@@ -1,0 +1,21 @@
+{
+  "source": "04-code-claims.md",
+  "gold": [
+    { "verbatim": "The client listens on port 7433 by default", "type": "numeric" },
+    { "verbatim": "const DefaultPort = 7433", "type": "numeric" },
+    { "verbatim": "every request times out after thirty seconds", "type": "numeric" },
+    { "verbatim": "Timeout: 30 * time.Minute", "type": "numeric" },
+    { "verbatim": "Every error returned by the package is wrapped" },
+    { "verbatim": "fmt.Errorf(\"dialing %s: %w\", addr, err)" },
+    { "verbatim": "// Get never returns a nil Client." },
+    { "verbatim": "return nil, ErrNotReady" },
+    { "verbatim": "// Lookup is case-sensitive." },
+    { "verbatim": "strings.EqualFold(name, entry.Name)" },
+    { "verbatim": "A failed call is retried three times", "type": "numeric" },
+    { "verbatim": "const maxRetries = 5", "type": "numeric" },
+    { "verbatim": "lookups are cached for five minutes", "type": "numeric" },
+    { "verbatim": "const cacheTTL = 5 * time.Minute", "type": "numeric" },
+    { "verbatim": "// Fetch returns ErrNotFound when the key is absent." },
+    { "verbatim": "return ErrNotFound" }
+  ]
+}

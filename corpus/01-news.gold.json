@@ -1,0 +1,22 @@
+{
+  "source": "01-news.md",
+  "gold": [
+    { "verbatim": "Nordwind Energie announced on 14 March 2024", "type": "event" },
+    { "verbatim": "it will build a 480 MW offshore wind farm in the German Bight", "type": "numeric" },
+    { "verbatim": "roughly 90 kilometres north-west of Helgoland", "type": "numeric" },
+    { "verbatim": "The project, named Seeadler", "type": "entity" },
+    { "verbatim": "is expected to cost €2.1 billion", "type": "numeric" },
+    { "verbatim": "to begin delivering power to the grid in late 2028", "type": "event" },
+    { "verbatim": "said chief executive Ingrid Halvorsen at a press conference in Hamburg" },
+    { "verbatim": "the permitting reform of 2023 finally made projects at this depth economically viable", "type": "causal" },
+    { "verbatim": "The wind farm will use 60 turbines of 8 MW each", "type": "numeric" },
+    { "verbatim": "supplied by the Danish manufacturer Vestas under a contract signed in January" },
+    { "verbatim": "founded in 1984 in Bremerhaven" },
+    { "verbatim": "employs 3,200 people", "type": "numeric" },
+    { "verbatim": "reported revenue of €1.4 billion in 2023", "type": "numeric" },
+    { "verbatim": "The Federal Agency for Nature Conservation warned that the site overlaps a migratory corridor used by common terns" },
+    { "verbatim": "asked for construction to pause during the spring migration" },
+    { "verbatim": "require approval from the Federal Maritime and Hydrographic Agency" },
+    { "verbatim": "which has scheduled its decision for September 2024" }
+  ]
+}

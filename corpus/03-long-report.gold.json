@@ -1,0 +1,28 @@
+{
+  "source": "03-long-report.md",
+  "gold": [
+    { "verbatim": "established in 2009 by the Marine Research Council" },
+    { "verbatim": "340 kilometres of the eastern seaboard", "type": "numeric" },
+    { "verbatim": "2023 operating budget of £8.7 million", "type": "numeric" },
+    { "verbatim": "directed by Dr. Amara Okonjo, who succeeded Dr. Peter Lindqvist in April 2022" },
+    { "verbatim": "The programme maintains 74 permanent monitoring stations", "type": "numeric" },
+    { "verbatim": "Net shoreline retreat across the monitored coast averaged 1.8 metres in 2023", "type": "numeric" },
+    { "verbatim": "compared with 1.1 metres in 2022 and a ten-year mean of 0.9 metres", "type": "numeric" },
+    { "verbatim": "Storm Bettina produced a peak significant wave height of 9.4 metres at the Ravensmouth buoy on 12 November 2023", "type": "numeric" },
+    { "verbatim": "Storm Cyrus followed on 23 November, generating a storm surge of 2.3 metres above predicted tide level at Sandhaven", "type": "numeric" },
+    { "verbatim": "Twelve of the 74 stations recorded net accretion rather than erosion", "type": "numeric" },
+    { "verbatim": "1.24 million cubic metres of sand left the monitored cell in 2023", "type": "numeric" },
+    { "verbatim": "approximately 62% was transported offshore beyond the closure depth", "type": "numeric" },
+    { "verbatim": "sediment retention behind the Kelbrook Reservoir, completed in 2019", "type": "causal" },
+    { "verbatim": "Dune vegetation cover was surveyed at 22 sites", "type": "numeric" },
+    { "verbatim": "Mean cover fell from 71% in 2022 to 64% in 2023", "type": "numeric" },
+    { "verbatim": "A trial planting of 40,000 marram culms was carried out at Thornwick Bay in March 2023" },
+    { "verbatim": "Three monitoring stations were lost during Storm Bettina: stations 31, 44 and 52" },
+    { "verbatim": "Replacement cost is estimated at £46,000 per station", "type": "numeric" },
+    { "verbatim": "Data completeness for the year was 94.1%, down from 97.6% in 2022", "type": "numeric" },
+    { "verbatim": "The programme adopted a new grain-size analysis protocol in January 2023" },
+    { "verbatim": "submitted evidence to the parliamentary Coastal Resilience Inquiry in May 2023" },
+    { "verbatim": "The programme intends to install eight additional stations in 2024" },
+    { "verbatim": "Dr. Okonjo will step down as director in September 2024" }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "type": "object",
+  "properties": {
+    "facts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer" },
+          "fact": { "type": "string" },
+          "type": {
+            "type": "string",
+            "enum": ["quote", "numeric", "event", "entity", "definition", "causal", "other"]
+          },
+          "confidence": {
+            "type": "string",
+            "enum": ["high", "medium", "low"]
+          },
+          "verbatim": { "type": ["string", "null"] }
+        },
+        "required": ["id", "fact", "type", "confidence", "verbatim"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["facts"],
+  "additionalProperties": false
+}

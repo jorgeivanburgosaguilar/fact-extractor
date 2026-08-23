@@ -1,0 +1,23 @@
+{
+  "source": "02-research.md",
+  "gold": [
+    { "verbatim": "published in the Journal of Metabolic Medicine on 4 September 2023" },
+    { "verbatim": "time-restricted eating produced a modest improvement in glycaemic control among adults with prediabetes" },
+    { "verbatim": "Time-restricted eating is a pattern in which all daily calories are consumed within a fixed window", "type": "definition" },
+    { "verbatim": "The trial enrolled 218 participants aged between 34 and 67", "type": "numeric" },
+    { "verbatim": "recruited from four clinics in Ontario", "type": "numeric" },
+    { "verbatim": "assigned in a 1:1 ratio" },
+    { "verbatim": "were followed for 26 weeks", "type": "numeric" },
+    { "verbatim": "Mean HbA1c fell by 0.31 percentage points in the intervention group against 0.08 in the control group", "type": "numeric" },
+    { "verbatim": "The difference of 0.23 points was statistically significant at p = 0.004", "type": "numeric" },
+    { "verbatim": "Fasting insulin fell by 12% in the intervention group", "type": "numeric" },
+    { "verbatim": "2.4 kg and 2.1 kg respectively", "type": "numeric" },
+    { "verbatim": "84% of intervention participants met the eight-hour window on at least six days a week", "type": "numeric" },
+    { "verbatim": "by week 26 that figure had fallen to 51%", "type": "numeric" },
+    { "verbatim": "Nineteen participants withdrew, eleven of them citing social difficulty in keeping to the schedule" },
+    { "verbatim": "said Dr. Priya Raghunathan, the trial's principal investigator" },
+    { "verbatim": "The trial was funded by the Canadian Institutes of Health Research" },
+    { "verbatim": "Two of the eleven authors declared consulting fees from a manufacturer of continuous glucose monitors", "type": "numeric" },
+    { "verbatim": "the 26-week duration is too short to establish whether the improvement persists" }
+  ]
+}
