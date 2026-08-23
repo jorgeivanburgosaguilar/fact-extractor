@@ -127,12 +127,9 @@ context is idle VRAM, not wasted compute. There is no performance argument for s
 What the extra room is *for* is covered in section 7. It is output headroom, not licence
 to feed the model longer passages.
 
-**16384 is safe for both installed models.** `--coder` selects
-`Qwen2.5-Coder-7B-Instruct-Q4_K_M`, whose trained context is **32768** (`ollama show
-fact-extractor-coder`) against the main model's 1010000. Both are comfortably above the
-window, so `num_ctx` stays one number rather than becoming model-specific. Check this
-again before installing any third model — a model trained below 16384 would silently
-degrade rather than refuse.
+**Check the trained context before swapping the model.** `ollama show <model>` reports it;
+the model in use has 1010000, far above the window. A model trained below 16384 would
+silently degrade rather than refuse.
 
 ### The failure mode above the budget is silence, not a crash
 

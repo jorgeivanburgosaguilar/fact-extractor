@@ -15,18 +15,13 @@ A Windows CLI in **Go** (`fact-extractor.exe`) that turns one text file into a s
 **source-traceable** list of facts, and exits.
 
 ```powershell
-fact-extractor.exe                      # system-instruction.md + prompt.md -> result.json
-fact-extractor.exe --benchmark          # score the gold corpus, exit 0 or 1
-fact-extractor.exe --benchmark --coder  # score the same corpus under the second model
+fact-extractor.exe              # system-instruction.md + prompt.md -> result.json
+fact-extractor.exe --benchmark  # score the gold corpus, exit 0 or 1
 ```
 
-It does exactly one job. There is no profile system and no output format other than JSON.
-Model, context and sampling come from `settings.json`; input and output filenames are
-fixed.
-
-There are exactly **two flags**: `--benchmark`, and `--coder`, which selects
-`ollama.coder_model` **for measurement only**. The bound on that second model is a rule,
-not a preference — see §7.
+It does exactly one job. There is no profile system, no second model, no output format
+other than JSON, and **no flags except `--benchmark`**. Model, context and sampling come
+from `settings.json`; input and output filenames are fixed.
 
 ### The identity to protect
 
@@ -249,6 +244,8 @@ Each corpus entry pairs a source text with gold facts anchored to source spans:
   *warning* there (a failed citation, the signal we deliberately preserve), never a
   contract violation.
 - **Inferred facts (`verbatim: null`) are never graded** — they have no span to match.
+- **Preflight:** confirm `ollama ps` reports full GPU placement. Benchmarking a
+  CPU-offloaded model measures the wrong thing.
 
 ### The claims-about-code case
 
@@ -265,8 +262,13 @@ Two constraints when editing that corpus: **both halves of a pair must be citabl
 a fact about an *absence* has no span, becomes `verbatim: null`, and is not graded — and the
 document must **fit in one chunk**, because a pair split across chunks is invisible to the
 model by construction.
-- **Preflight:** confirm `ollama ps` reports full GPU placement. Benchmarking a
-  CPU-offloaded model measures the wrong thing.
+
+**This case is a capability probe, not a gate.** The current model scores **8/16**: it reads
+prose claims and skims code blocks longer than a couple of lines — every evidence span it
+found sits in a two-line block, every one it missed in a block of seven or more. That number
+is the measurement. It is expected to stay red until a model does better, and a
+reasoning-capable model is the obvious next thing to point at it. **Never trim the gold list
+to make it pass.**
 
 ---
 
@@ -297,11 +299,7 @@ model by construction.
 - Write `settings.json` from the binary.
 - Put `PARAMETER` lines in the Modelfile.
 - Let `Verify` overwrite `confidence`.
-- Add a third flag. The CLI takes `--benchmark` and `--coder`, and nothing else.
-- Grow the second model into a profile system. It exists **for A/B measurement only**: one
-  flag, one `ollama.coder_model` field, no instruction fork, no profile map. A *third*
-  model, or a flag that bundles a different instruction with a different model, is the
-  profile system this project deleted. The bound is the whole reason the rule was relaxed.
-- Reintroduce profiles or a non-JSON output mode.
+- Add flags. The CLI takes `--benchmark` and nothing else.
+- Reintroduce profiles, a second model, or a non-JSON output mode.
 - Assert an exact fact count in a test.
 - Commit `.gguf` files or binaries to git.

@@ -59,7 +59,6 @@ func main() {
 
 func run() error {
 	bench := flag.Bool("benchmark", false, "score the gold corpus instead of processing prompt.md")
-	coder := flag.Bool("coder", false, "use ollama.coder_model instead of ollama.model")
 	flag.Usage = usage
 	flag.Parse()
 	if flag.NArg() > 0 {
@@ -95,11 +94,7 @@ func run() error {
 	defer svc.Stop()
 	stopOnInterrupt(svc)
 
-	model, err := chooseModel(cfg, *coder)
-	if err != nil {
-		return err
-	}
-	client := ollama.New(cfg.Ollama.Host, model)
+	client := ollama.New(cfg.Ollama.Host, cfg.Ollama.Model)
 	if err := client.Preflight(); err != nil {
 		return err
 	}
@@ -110,22 +105,6 @@ func run() error {
 		return runBenchmark(ex, cfg)
 	}
 	return runOnce(ex, cfg)
-}
-
-// chooseModel picks the model this run will use.
-//
-// The choice is made once, here, before any request is sent, so a single run
-// names exactly one model. That is what keeps the 6 GB budget safe with two
-// models installed: there is no code path that can put both in flight.
-func chooseModel(cfg *settings.Settings, coder bool) (string, error) {
-	if !coder {
-		return cfg.Ollama.Model, nil
-	}
-	if cfg.Ollama.CoderModel == "" {
-		return "", fmt.Errorf("--coder needs \"ollama.coder_model\" in settings.json, which is empty.\n" +
-			"build.ps1 records it when the coder .gguf is present.")
-	}
-	return cfg.Ollama.CoderModel, nil
 }
 
 // ensureService returns a handle on the Ollama service the run will use.
@@ -311,7 +290,7 @@ func runOnce(e *extractor, cfg *settings.Settings) error {
 		return fmt.Errorf("writing %s: %w", dest, err)
 	}
 
-	fmt.Fprintf(os.Stderr, "extracted %d facts using %s\n", len(doc.Facts), e.client.Model())
+	fmt.Fprintf(os.Stderr, "extracted %d facts\n", len(doc.Facts))
 	if st.verified.Any() {
 		fmt.Fprintf(os.Stderr,
 			"citations: %d exact, %d snapped to the source, %d not found and set to null\n",
@@ -331,7 +310,7 @@ func runBenchmark(e *extractor, cfg *settings.Settings) error {
 	}
 
 	fmt.Fprintf(os.Stderr, "benchmarking %s against %d corpus case(s)\n",
-		e.client.Model(), len(cases))
+		cfg.Ollama.Model, len(cases))
 	fmt.Fprintf(os.Stderr, "a case passes with at most %d gold facts unmatched\n",
 		benchmark.Threshold)
 	checkPlacement(e)
@@ -514,15 +493,10 @@ func resolveBaseDir() (string, error) {
 func usage() {
 	fmt.Fprint(os.Stderr, `fact-extractor `+version+` - extract source-traceable facts from a text file
 
-Usage: fact-extractor [--benchmark] [--coder]
+Usage: fact-extractor [--benchmark]
 
   (no flags)     `+promptFile+` -> `+outputFile+`
   --benchmark    score the gold corpus in `+corpusDir+`/ and exit 0 or 1
-  --coder        use ollama.coder_model instead of ollama.model
-
-The flags combine: --benchmark --coder scores the same corpus under the second
-model, which is what the second model is for. Only one model is ever named per
-run, so both are never resident at once.
 
 Model, context and sampling come from settings.json, which is produced by the
 build. The Ollama service is started if none is running (see settings.json), and

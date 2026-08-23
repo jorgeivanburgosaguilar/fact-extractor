@@ -16,16 +16,10 @@ import (
 )
 
 // Ollama locates the service and the model inside it.
-//
-// CoderModel is the alternative the --coder flag selects. It exists so two
-// models can be scored on the same corpus, and for nothing else: a third model
-// or a flag that also swapped the instruction would be the profile system this
-// project deliberately removed.
 type Ollama struct {
-	Host       string `json:"host"`
-	Model      string `json:"model"`
-	CoderModel string `json:"coder_model"`
-	KeepAlive  int    `json:"keep_alive"`
+	Host      string `json:"host"`
+	Model     string `json:"model"`
+	KeepAlive int    `json:"keep_alive"`
 }
 
 // Options is the block sent to Ollama with every request. It is an open map so

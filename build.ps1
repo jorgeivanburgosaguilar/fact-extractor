@@ -19,15 +19,6 @@ $ggufCandidates = @(
     'D:\Modelos\lmstudio-community\Qwen2.5-7B-Instruct-1M-GGUF\Qwen2.5-7B-Instruct-1M-Q4_K_M.gguf'
 )
 
-# The second model exists so two can be scored on the same corpus with
-# --coder. It is optional: without it the build still produces a working tool,
-# and --coder reports that coder_model is empty.
-$coderModelName = 'fact-extractor-coder'
-$coderGgufCandidates = @(
-    (Join-Path $root 'models\qwen2.5-coder-7b-instruct-q4_k_m.gguf'),
-    'D:\Modelos\stefancosma\Qwen2.5-Coder-7B-Instruct-Q4_K_M-GGUF\qwen2.5-coder-7b-instruct-q4_k_m.gguf'
-)
-
 New-Item -ItemType Directory -Force -Path $dist, "$dist\corpus", "$dist\schemas" | Out-Null
 
 Write-Host 'building fact-extractor.exe' -ForegroundColor Cyan
@@ -76,7 +67,7 @@ foreach ($name in $serviceEnv.Keys) {
 }
 
 # ---------------------------------------------------------------------------
-# The Ollama models
+# The Ollama model
 #
 # The Modelfile carries FROM and nothing else. Every PARAMETER line here would
 # become a default that request options then override, which is two sources of
@@ -104,30 +95,25 @@ function New-OllamaModel([string]$name, [string]$gguf, [string]$modelfilePath) {
     if ($LASTEXITCODE -ne 0) { throw "ollama create failed for $name" }
 }
 
-$gguf      = $ggufCandidates      | Where-Object { Test-Path $_ } | Select-Object -First 1
-$coderGguf = $coderGgufCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+$gguf = $ggufCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 
 if (-not $gguf) {
-    Write-Host 'No .gguf found for the main model - skipping its creation. Looked in:' -ForegroundColor Yellow
+    Write-Host 'No .gguf found - skipping model creation. Looked in:' -ForegroundColor Yellow
     $ggufCandidates | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
-}
-if (-not $coderGguf) {
-    Write-Host 'No coder .gguf found - skipping it. --coder will report coder_model is empty.' -ForegroundColor Yellow
-    $coderGgufCandidates | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
 }
 
 $ollamaOnPath = [bool](Get-Command ollama -ErrorAction SilentlyContinue)
-if (($gguf -or $coderGguf) -and -not $ollamaOnPath) {
+if ($gguf -and -not $ollamaOnPath) {
     Write-Host 'ollama is not on PATH - skipping model creation.' -ForegroundColor Yellow
     Write-Host "  Run later:  ollama create $modelName -f $dist\Modelfile" -ForegroundColor Yellow
 }
 
 $startedOllama = $null
-if (($gguf -or $coderGguf) -and $ollamaOnPath) {
+if ($gguf -and $ollamaOnPath) {
     if (Test-OllamaUp) {
         Write-Host 'using the Ollama service already running (it will be left running).' -ForegroundColor DarkGray
     } else {
-        Write-Host 'starting ollama serve so models can be created' -ForegroundColor Cyan
+        Write-Host 'starting ollama serve so the model can be created' -ForegroundColor Cyan
         $startedOllama = Start-Process -FilePath 'ollama' -ArgumentList 'serve' -PassThru -WindowStyle Hidden
         $deadline = (Get-Date).AddSeconds(60)
         while (-not (Test-OllamaUp)) {
@@ -140,8 +126,7 @@ if (($gguf -or $coderGguf) -and $ollamaOnPath) {
     }
 
     try {
-        if ($gguf)      { New-OllamaModel $modelName      $gguf      (Join-Path $dist 'Modelfile') }
-        if ($coderGguf) { New-OllamaModel $coderModelName $coderGguf (Join-Path $dist 'Modelfile.coder') }
+        New-OllamaModel $modelName $gguf (Join-Path $dist 'Modelfile')
     } finally {
         # Stop only what this script started; leave a service the user was
         # already running alone. Killing the tree matters - the runner
@@ -162,16 +147,13 @@ if (-not $gguf) { $gguf = $ggufCandidates[0] }
 # The service env is what makes the VRAM budget hold (hardware-finetune.md
 # section 4). With manage = true the CLI starts `ollama serve` itself when none
 # is running and applies these - settings.json owns the whole tuning story.
-# $serviceEnv was computed above, before the models were created, so the store
-# the build wrote to and the store the CLI reads from cannot disagree.
+# $serviceEnv was computed above, before the model was created, so the store the
+# build wrote to and the store the CLI reads from cannot disagree.
 $settings = [ordered]@{
     ollama = [ordered]@{
-        host        = 'http://127.0.0.1:11434'
-        model       = $modelName
-        # Empty when no coder .gguf was found, which is what makes --coder fail
-        # with a clear message rather than a missing-model error from Ollama.
-        coder_model = $(if ($coderGguf) { $coderModelName } else { '' })
-        keep_alive  = 0         # unload as soon as the run ends; hold no VRAM
+        host       = 'http://127.0.0.1:11434'
+        model      = $modelName
+        keep_alive = 0          # unload as soon as the run ends; hold no VRAM
     }
     service = [ordered]@{
         manage                  = $true

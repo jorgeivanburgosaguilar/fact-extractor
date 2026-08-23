@@ -127,10 +127,6 @@ func (c *Client) Chat(msgs []Message, opts map[string]any, format json.RawMessag
 	return res, nil
 }
 
-// Model reports which model this client sends requests for, so a run can name
-// it without the caller having to repeat how it was chosen.
-func (c *Client) Model() string { return c.model }
-
 // Model describes one model the service holds.
 type Model struct {
 	Name string `json:"name"`
