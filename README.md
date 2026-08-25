@@ -27,7 +27,10 @@ benchmark reports how much of my list the model recovered.
 | `02-research` — dense academic prose | 18 | 14 | |
 | `03-long-report` — long mixed report | 23 | 23 | |
 | `04-code-claims` — prose *about code* | 16 | 8 | capability probe |
-| **Total** | **74** | **61** | **82%** |
+| `05-survey` — dense multi-source literature review | 23 | 13 | multi-chunk density probe |
+| **Total** | **97** | **74** | **76%** |
+
+Measured at `chunk_tokens = 1000`.
 
 Two honest caveats, because they cut both ways:
 
@@ -37,11 +40,14 @@ Two honest caveats, because they cut both ways:
 - **Where it loses, it loses badly.** `02-research` is dense clinical prose, and the model
   drops whole clauses. `04-code-claims` is the interesting one: it reads prose claims about
   code fine, then skims the code itself. Every code span it found sits in a two-line block;
-  every one it missed sits in a block of seven lines or more.
+  every one it missed sits in a block of seven lines or more. `05-survey` shows the same
+  skimming pattern applied to a dense bibliography-style source list and a plain-text table
+  instead of code — it missed both gold facts drawn from the table entirely.
 
 So: better than me at long, well-structured reports. Reliably worse on dense academic prose,
-and clearly worse at reading code. **`--benchmark` exits non-zero on purpose** — two cases
-fail today and are meant to stay failing until a model does better.
+worse at reading code, and worse again on dense multi-source citation lists.
+**`--benchmark` exits non-zero on purpose** — three cases fail today and are meant to stay
+failing until a model does better.
 
 ## The part that makes it a fair contest
 
@@ -54,17 +60,33 @@ That check is the product. The model is replaceable; the guarantee is not.
 
 ```json
 {
-  "facts": [
+  "summary": {
+    "total": 17, "verbatim": 14, "inferred": 3, "failed_citations": 1, "unlocated": 0
+  },
+  "verbatim_facts": [
     {
       "id": 1,
       "fact": "Nordwind Energie will build a 480 MW offshore wind farm in the German Bight.",
       "type": "numeric",
       "confidence": "high",
-      "verbatim": "it will build a 480 MW offshore wind farm in the German Bight"
+      "verbatim": "it will build a 480 MW offshore wind farm in the German Bight",
+      "position": { "line": 12, "column": 5 }
     }
+  ],
+  "inferred_facts": [
+    { "id": 4, "fact": "The project is publicly funded.", "type": "causal", "confidence": "low" }
   ]
 }
 ```
+
+The cited claims and the uncited ones go in separate arrays, and every citation carries the
+`line` and `column` where it starts, so you can jump straight to it in your input instead of
+searching the document for the quoted string. Both are 1-based. Ids are not renumbered by the
+split: they stay 1..N across both arrays, so an id still identifies a fact.
+
+`position` is `null` only in one narrow case — a span that sits across a chunk boundary and
+so cannot be placed in the whole document. The fact keeps its citation; only the position is
+missing.
 
 Three output states are worth telling apart:
 
@@ -216,13 +238,16 @@ avoid facts about an *absence* — they have no span to cite, so they cannot be 
 ## Validating output independently
 
 `checkfacts` re-checks a `result.json` against its source without trusting the tool that
-produced it — schema, ids, category vocabulary and verbatim traceability. It shares no code
-with the extractor, deliberately, so that it can catch the extractor's bugs rather than
-confirm them:
+produced it — schema, ids, category vocabulary, verbatim traceability, and that each
+reported `line`/`column` really does land on its span. It shares no code with the extractor,
+deliberately, so that it can catch the extractor's bugs rather than confirm them:
 
 ```powershell
 .\checkfacts.exe --source prompt.md result.json
 ```
+
+A position that points at the wrong line is a failure, not a warning: it reads as
+authoritative while sending you somewhere the quote is not.
 
 ## Troubleshooting
 

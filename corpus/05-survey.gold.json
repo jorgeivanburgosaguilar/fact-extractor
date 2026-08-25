@@ -1,0 +1,28 @@
+{
+  "source": "05-survey.md",
+  "gold": [
+    { "verbatim": "214 Berthings at Sandhaven Container Terminal", "type": "numeric" },
+    { "verbatim": "models tug standby counts against mooring predictability", "type": "other" },
+    { "verbatim": "forty-one abort events, coded into six failure classes", "type": "numeric" },
+    { "verbatim": "interviews with twenty-six line handlers and pilots", "type": "numeric" },
+    { "verbatim": "vacuum pads against magnetic heads, at three terminals", "type": "numeric" },
+    { "verbatim": "abort rate against crosswind speed at approach", "type": "causal" },
+    { "verbatim": "a median mooring time of 6.4 minutes against 14.1 minutes for a conventional four-line crew", "type": "numeric" },
+    { "verbatim": "Sandhaven kept its full crew on standby throughout", "type": "causal" },
+    { "verbatim": "forty-one aborted approaches at Sandhaven and Ravensmouth", "type": "numeric" },
+    { "verbatim": "Marine growth on the plating prevents a full seal", "type": "causal" },
+    { "verbatim": "Vessel arrives outside the seven-degree capture cone", "type": "causal" },
+    { "verbatim": "cut its standby tug count from four to three without any increase in waiting time", "type": "numeric" },
+    { "verbatim": "fell from nineteen holds a month to four", "type": "numeric" },
+    { "verbatim": "abort rate rises from 3% below a force 4 crosswind to 22% above force 6", "type": "numeric" },
+    { "verbatim": "nine of twenty-six line handlers described the system as something they were watching in case it failed", "type": "numeric" },
+    { "verbatim": "magnetic mooring aborted in only 4% of approaches against vacuum mooring's 9%", "type": "numeric" },
+    { "verbatim": "prices the saved six to eight minutes per berthing at the terminal's marginal berth-hour rate", "type": "numeric" },
+    { "verbatim": "Sandhaven's rate dropping from 24% in the first winter to 15% in the second", "type": "numeric" },
+    { "verbatim": "median supervised approaches before independent use was eleven at Sandhaven", "type": "numeric" },
+    { "verbatim": "needs replacing roughly every four hundred berthings at Sandhaven's usage rate", "type": "numeric" },
+    { "verbatim": "neither site publishes the raw approach-by-approach logs the pooling is based on", "type": "other" },
+    { "verbatim": "the mooring-time saving survives a third season once pads have worn", "type": "other" },
+    { "verbatim": "matched terminals, one failure taxonomy, a reliability number beside the speed number", "type": "entity" }
+  ]
+}

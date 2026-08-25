@@ -55,28 +55,42 @@ func NewSource(text string) *Source {
 // position. The returned string is guaranteed to be a substring of the input,
 // even when the model's own wording of the span was not.
 func (s *Source) Find(span string) (string, bool) {
+	text, _, ok := s.Locate(span)
+	return text, ok
+}
+
+// Locate is Find plus the offset the match starts at, counted in runes from the
+// start of the original text. Reporting where a citation sits needs the position
+// as well as the text, and the search already knows it.
+func (s *Source) Locate(span string) (string, int, bool) {
 	q := normalizeSpan(span)
 	// Try the span as given first, so punctuation that genuinely belongs to it
 	// survives. Only if that fails do we retry without the edges, which is what
 	// rescues a span carrying an added full stop or a stray wrapping quote.
-	if got, ok := s.search(q); ok {
-		return got, true
+	if got, at, ok := s.search(q); ok {
+		return got, at, true
 	}
 	return s.search(trimEdges(q))
 }
 
-func (s *Source) search(q []rune) (string, bool) {
+// search returns the matched original text and the rune offset it begins at.
+//
+// The offset always addresses the first character of the returned text: the
+// TrimSpace below can only ever trim the tail, because normalizeSpan strips
+// leading whitespace from the query, so q[0] is never a space and orig[start]
+// is therefore never whitespace.
+func (s *Source) search(q []rune) (string, int, bool) {
 	if len(q) == 0 || len(q) > len(s.norm) {
-		return "", false
+		return "", 0, false
 	}
 	for i := 0; i+len(q) <= len(s.norm); i++ {
 		if matchAt(s.norm, q, i) {
 			start := s.idx[i]
 			end := s.idx[i+len(q)-1]
-			return strings.TrimSpace(string(s.orig[start : end+1])), true
+			return strings.TrimSpace(string(s.orig[start : end+1])), start, true
 		}
 	}
-	return "", false
+	return "", 0, false
 }
 
 // VerifyResult counts what Verify had to do, for reporting to the user.

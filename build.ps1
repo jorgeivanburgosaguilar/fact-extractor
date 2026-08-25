@@ -162,7 +162,7 @@ $settings = [ordered]@{
         env                     = $serviceEnv
     }
     source_model = $gguf        # provenance, not a runtime path
-    chunk_tokens = 3000
+    chunk_tokens = 1000
     options      = [ordered]@{
         num_ctx        = 16384  # always explicit: Ollama silently shrinks an automatic context
         num_gpu        = 99

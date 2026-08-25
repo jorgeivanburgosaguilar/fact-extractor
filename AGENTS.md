@@ -33,13 +33,41 @@ product.
 It is **not an agent**: no loop, no tool use, no autonomy. Control flow is fixed before the
 model is ever called.
 
-### Output schema (frozen)
+### Model schema (frozen)
 
 `schemas/facts.json` — `id`, `fact`, `type`, `confidence`, `verbatim`. Seven categories:
 `quote`, `numeric`, `event`, `entity`, `definition`, `causal`, `other`.
 
 The schema is a theory of what a fact is. Changing it invalidates every comparison between
 models and between system instructions, so it does not change casually.
+
+### On-disk shape (not the same thing)
+
+`schemas/facts.json` is the `format` field sent to Ollama: the **model's** contract, and the
+thing that is frozen. `result.json` is what a **person** opens, and it is allowed to be a
+different shape, because rearranging it costs no comparability:
+
+```json
+{
+  "summary": { "total": 17, "verbatim": 14, "inferred": 3,
+               "failed_citations": 1, "unlocated": 0 },
+  "verbatim_facts": [ { …, "verbatim": "…", "position": { "line": 12, "column": 5 } } ],
+  "inferred_facts": [ { "id": 4, "fact": "…", "type": "causal", "confidence": "low" } ]
+}
+```
+
+`internal/output` builds this after extraction and verification are over. It splits the facts
+on whether `verbatim` is null and locates each citation in the source. Two rules make the
+split safe to rely on:
+
+- **Ids are never renumbered.** They stay 1..N across the *union* of both arrays, so an id
+  remains the fact's identity.
+- **`position` is derived here, never asked of the model.** It is `line` and `column`, both
+  1-based, column counted in runes. It is `null` only when a span could not be located in the
+  whole source — see the chunk-seam case in §4.
+
+The pipeline itself still works on the flat list: `facts.Parse`, `facts.Verify` and
+`facts.Merge` are untouched by any of this.
 
 ---
 
@@ -105,7 +133,7 @@ no merging, no compiled-in fallback chain — one flat file describing one job.
     }
   },
   "source_model": "models/Qwen2.5-7B-Instruct-1M-Q4_K_M.gguf",
-  "chunk_tokens": 3000,
+  "chunk_tokens": 1000,
   "options": {
     "num_ctx": 16384, "num_gpu": 99, "num_batch": 512,
     "temperature": 0.0, "top_k": 1, "top_p": 1.0,
@@ -138,8 +166,11 @@ override, which is two sources of truth for one value.
 6. For each chunk: POST /api/chat { messages, format, options, keep_alive: 0 }.
    Parse the reply, then verify every verbatim span against that chunk.
 7. Merge the per-chunk documents, drop duplicates, renumber ids.
-8. Write result.json. Report facts, token counts, elapsed time and citation repairs.
-9. Stop the service if — and only if — this run started it.
+8. Split the merged facts into cited and inferred, and locate every citation in the whole
+   source (`internal/output`). This is presentation, after inference: it adds no claim and
+   changes no fact.
+9. Write result.json. Report facts, token counts, elapsed time and citation repairs.
+10. Stop the service if — and only if — this run started it.
 ```
 
 ### Error handling (minimum required)
@@ -198,6 +229,19 @@ Three mechanisms, three jobs. Do not credit one with another's work.
   | `null` | `low` | Inferred from the text |
   | `null` | `high` / `medium` | **A citation that failed verification** |
 
+- **`position` is a report, not a guarantee.** `Verify` checks each span against *its own
+  chunk*; `internal/output` locates it in the *whole* document. These can disagree in one
+  narrow case: `textsplit` packs sentence units with a literal `
+
+` the source may spell
+  as a single space, so a span straddling that seam is a real substring of its chunk and not
+  of the source. Normalisation collapses whitespace on both sides and resolves it; if a span
+  still cannot be placed, the fact **keeps its citation** and reports `position: null`. A
+  fact is never dropped or moved between arrays because a lookup failed — the arrays are
+  partitioned on `verbatim` alone.
+- **A position nothing checks is worse than none.** It reads as authoritative while sending
+  the reader to the wrong line, so `internal/validate` re-derives every one independently
+  and calls a mismatch a contract violation.
 - Greedy decoding is **not** bit-reproducible, and does **not** prevent invented facts —
   greedy makes the argmax certain, not correct.
 - The system instruction must be sent **first and byte-identical** on every request so it
@@ -270,13 +314,31 @@ is the measurement. It is expected to stay red until a model does better, and a
 reasoning-capable model is the obvious next thing to point at it. **Never trim the gold list
 to make it pass.**
 
+### The multi-chunk density case
+
+`05-survey` is a synthetic literature-review document — invented authors, institutions and
+findings in the corpus's existing fictional world, not summarised from any real source. It
+probes the shape `chunk_tokens` tuning exists to worry about: attribution-dense prose, a
+tab-separated table pasted as plain text, and one paragraph long enough (over 1,000 estimated
+tokens) to force `textsplit`'s sentence-level fallback rather than staying a single paragraph
+unit. At `chunk_tokens = 1000` it splits into three chunks, the only corpus document that
+does.
+
+**This case is also a capability probe, not a gate**, and it is expected to be the hardest one
+in the suite. The current model scores **13/23**: it misses both gold spans drawn from the
+table and most of the bibliography-style source list, the same skimming pattern
+`04-code-claims` shows against code — dense, list-shaped, non-narrative text is where recall
+drops hardest. It also produced far more failed citations here (21) than on any other case,
+consistent with dense citation-heavy prose being harder to quote back exactly. That number is
+the measurement, not a bug in the corpus. **Never trim the gold list to make it pass.**
+
 ---
 
 ## 6. Project conventions
 
 - **I/O files:** `system-instruction.md` (prompt), `prompt.md` (input), `result.json`
-  (output), `result.raw.txt` (rescued output on failure), `settings.json` (configuration).
-  Do not rename these.
+  (output, shaped by `internal/output` — see §1), `result.raw.txt` (rescued output on
+  failure), `settings.json` (configuration). Do not rename these.
 - The schema and the system instruction are `go:embed`-ed as fallbacks; a file beside the
   exe wins.
 - **`settings.json` is generated by the build, never by the binary.**
@@ -299,6 +361,9 @@ to make it pass.**
 - Write `settings.json` from the binary.
 - Put `PARAMETER` lines in the Modelfile.
 - Let `Verify` overwrite `confidence`.
+- Renumber ids when splitting the output into arrays, or partition those arrays on anything
+  other than whether `verbatim` is null.
+- Report a `position` that nothing independently checked.
 - Add flags. The CLI takes `--benchmark` and nothing else.
 - Reintroduce profiles, a second model, or a non-JSON output mode.
 - Assert an exact fact count in a test.

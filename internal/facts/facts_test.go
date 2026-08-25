@@ -40,13 +40,15 @@ func TestMergeSkipsNilAndEmpty(t *testing.T) {
 	}
 }
 
-func TestMergeOfNothingEncodesAsEmptyArray(t *testing.T) {
-	raw, err := Encode(Merge(nil))
-	if err != nil {
-		t.Fatal(err)
+// Merging nothing must still give an empty slice rather than a nil one, so the
+// document encodes as an empty array instead of null.
+func TestMergeOfNothingIsEmptyNotNil(t *testing.T) {
+	got := Merge(nil)
+	if got.Facts == nil {
+		t.Fatal("expected an empty slice, got nil")
 	}
-	if string(raw) != "{\n  \"facts\": []\n}\n" {
-		t.Fatalf("expected an empty facts array, got %q", raw)
+	if len(got.Facts) != 0 {
+		t.Fatalf("expected no facts, got %d", len(got.Facts))
 	}
 }
 

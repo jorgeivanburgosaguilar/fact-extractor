@@ -56,15 +56,6 @@ func Merge(docs []*Document) *Document {
 	return merged
 }
 
-// Encode renders the merged document as the indented JSON written to disk.
-func Encode(d *Document) ([]byte, error) {
-	raw, err := json.MarshalIndent(d, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	return append(raw, '\n'), nil
-}
-
 // normalize reduces a fact to a comparison key: lowercase, letters and digits
 // only. Two chunks describing the same sentence should collapse to one entry
 // even if punctuation or spacing differs.

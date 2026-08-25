@@ -26,6 +26,7 @@ import (
 	"fact-extractor/internal/benchmark"
 	"fact-extractor/internal/facts"
 	"fact-extractor/internal/ollama"
+	"fact-extractor/internal/output"
 	"fact-extractor/internal/service"
 	"fact-extractor/internal/settings"
 	"fact-extractor/internal/textsplit"
@@ -281,7 +282,10 @@ func runOnce(e *extractor, cfg *settings.Settings) error {
 		return err
 	}
 
-	out, err := facts.Encode(doc)
+	// Split the verified facts into cited and inferred, and locate every
+	// citation in the source, so the file a person opens says where to look.
+	result := output.Build(doc, text)
+	out, err := output.Encode(result)
 	if err != nil {
 		return err
 	}
@@ -290,11 +294,17 @@ func runOnce(e *extractor, cfg *settings.Settings) error {
 		return fmt.Errorf("writing %s: %w", dest, err)
 	}
 
-	fmt.Fprintf(os.Stderr, "extracted %d facts\n", len(doc.Facts))
+	fmt.Fprintf(os.Stderr, "extracted %d facts (%d cited, %d inferred)\n",
+		result.Summary.Total, result.Summary.Verbatim, result.Summary.Inferred)
 	if st.verified.Any() {
 		fmt.Fprintf(os.Stderr,
 			"citations: %d exact, %d snapped to the source, %d not found and set to null\n",
 			st.verified.Exact, st.verified.Repaired, st.verified.Dropped)
+	}
+	if result.Summary.Unlocated > 0 {
+		fmt.Fprintf(os.Stderr,
+			"%d cited span(s) could not be located in the whole source; their position is null\n",
+			result.Summary.Unlocated)
 	}
 	fmt.Fprintf(os.Stderr, "wrote %s  (%d prompt + %d generated tokens, %s)\n",
 		dest, st.promptN, st.predictN, took(started))
@@ -338,7 +348,7 @@ func runBenchmark(e *extractor, cfg *settings.Settings) error {
 		// The independent second opinion: the same contract check the standalone
 		// checkfacts tool makes, run on the merged document against the whole
 		// source. Reported alongside the score, never part of pass/fail.
-		if enc, err := facts.Encode(doc); err == nil {
+		if enc, err := output.Encode(output.Build(doc, text)); err == nil {
 			if v, err := validate.Check(enc, text); err != nil {
 				fmt.Fprintf(os.Stderr, "    validation error: %v\n", err)
 			} else if !v.OK() {

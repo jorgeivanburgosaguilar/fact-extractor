@@ -380,9 +380,9 @@ This is the rule that follows, and it is the one the previous document got backw
 claimed 16384 was needed to "ingest long articles" - long articles are **chunked**, not
 ingested.
 
-At `num_ctx 8192` with 3000-token chunks the budget is roughly 1,700 (system instruction) +
-3,000 (chunk) + reply + 512, which boxes in the fact list. At `num_ctx 16384` with **chunks
-held at 3000 or lowered**, the entire gain goes to letting the model emit as many facts as
+At `num_ctx 8192` with 1000-token chunks the budget is roughly 1,700 (system instruction) +
+1,000 (chunk) + reply + 512, which boxes in the fact list. At `num_ctx 16384` with **chunks
+held at 1000 or lowered**, the entire gain goes to letting the model emit as many facts as
 the passage actually contains - attacking cause 2 directly.
 
 **16384 buys the model room to *write* a long fact list. It must not buy it a longer
@@ -390,15 +390,30 @@ passage to *read*.** The two rising together is what silently costs recall.
 
 ### Moving the dial
 
-Default is **3000**, the measured working value.
+Default is **1000**. On the corpus suite this ties or beats 3000 for recall while giving a
+dense multi-chunk document (a citation-heavy survey, say) its evenest possible packing -
+raising it to 1200 produces the same request count with a worse split, and only past 1500
+does the request count actually drop. 3000 was the previous default; see below.
 
 | Direction | Effect |
 |---|---|
-| **Lower** (1500-2500) | Higher recall, more requests, slower on long documents. Choose this when a missed fact matters more than elapsed time. |
-| **Default** (3000) | Balanced; validated by the corpus suite. |
-| **Higher** (4000+) | Fewer requests and faster, at rising risk of silent omission from dense passages. |
+| **Lower** (600-800) | Higher recall, more requests. Below roughly 650 a short corpus document (`02-research`, 618 est. tokens) starts to split and gains a runt chunk; going much lower risks splitting `04-code-claims` (480 est. tokens), whose gold pairs must stay in one chunk (section 5 of AGENTS.md). |
+| **Default** (1000) | Balanced; the evenest packing available for a dense multi-chunk document. |
+| **Higher** (1500-3000) | Fewer requests, at rising risk of silent omission from dense passages. 3000 was the previous default, still reasonable for short documents that fit in one chunk regardless. |
 
 Chunk boundaries follow paragraphs, then sentences, then a hard split.
+
+**Chunk size bounds neither recall nor elapsed time by itself - only recall is discussed
+above.** Nothing in this project sends `num_predict`, so the generation ceiling on any one
+request is whatever `num_ctx` leaves after the prompt: roughly 13,300 tokens of write room
+per chunk at 1000, versus roughly 11,350 at 3000. A run that is slow because generation
+keeps going to that ceiling - a plausible cause on a citation-dense, list-shaped document at
+greedy decoding with `repeat_penalty 1.0` - is not fixed by a smaller chunk; a smaller chunk
+mostly wins by being a more tractable per-request task that is more likely to stop on its
+own. The lever that actually bounds elapsed time is a `num_predict` entry in
+`settings.json`'s `options` block - `internal/settings.Options` already forwards unknown
+keys verbatim, so adding it needs no code change - but it is not set here; that is a
+deliberate choice left to `build.ps1`, not this file.
 
 > **Chunk sizing is now an estimate, not a measurement.** The old stack sized chunks with
 > the model's own tokenizer via `POST /tokenize`. Ollama does not expose tokenization on
