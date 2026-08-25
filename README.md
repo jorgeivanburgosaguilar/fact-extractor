@@ -204,7 +204,7 @@ OLLAMA_NUM_PARALLEL=1
 
 The CLI applies these itself when it starts the service. If you run Ollama yourself, or set
 `service.manage: false`, **you must set them by hand** — see
-[`hardware-finetune.md`](hardware-finetune.md) §4.
+[`hardware-finetune.md`](hardware-finetune.md) §2.3.
 
 ## Long documents
 

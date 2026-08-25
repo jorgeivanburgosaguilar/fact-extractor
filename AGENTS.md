@@ -103,7 +103,7 @@ The pipeline itself still works on the flat list: `facts.Parse`, `facts.Verify` 
 * **Always send `keep_alive: 0`** so the model unloads when the run ends. This preserves
   the property the project has always had: a run leaves no VRAM held.
 * **Always send `num_ctx` explicitly.** Ollama silently reduces an *automatic* context on
-  OOM; an explicit one it cannot shrink ([tuning file §4](hardware-finetune.md)).
+  OOM; an explicit one it cannot shrink ([tuning file §2.2](hardware-finetune.md)).
 * **Structured output is the `format` field**, carrying `schemas/facts.json` verbatim.
   Ollama forwards it to llama.cpp as `json_schema`, so output is grammar-constrained.
   Never ask for JSON "by prompt" and never parse with a regex.
@@ -111,7 +111,7 @@ The pipeline itself still works on the flat list: `facts.Parse`, `facts.Verify` 
   `OLLAMA_FLASH_ATTENTION`, `OLLAMA_KV_CACHE_TYPE`, `OLLAMA_NUM_PARALLEL`. The VRAM budget
   depends on them. When the CLI starts the service it applies them from
   `settings.json`'s `service.env` block; an adopted service is trusted to have them and
-  warned about once. See the tuning file §4.
+  warned about once. See the tuning file §2.3.
 
 ### Configuration: `settings.json`
 
@@ -192,14 +192,14 @@ override, which is two sources of truth for one value.
 
 - **6 GB VRAM** (RTX 3050 Laptop). Each 7B Q4_K_M is ~4.7 GB → **never two models loaded
   at once**. One run, one model.
-- **Default context 16384**, sent explicitly ([tuning file §3](hardware-finetune.md)).
+- **Default context 16384**, sent explicitly ([tuning file §2.2](hardware-finetune.md)).
   Above the budget the driver silently spills to system RAM and halves throughput instead
   of failing, so OOM detection is never a substitute for the warning.
 - **Verify GPU placement, do not assume it.** `ollama ps` must report `100% GPU`. Partial
   CPU offload is roughly half speed and produces no error
-  ([tuning file §4.1](hardware-finetune.md)).
+  ([tuning file §1.6](hardware-finetune.md)).
 - Long documents are **chunked**, never handled by raising context. `chunk_tokens` is the
-  only knob trading speed against missed facts ([tuning file §7](hardware-finetune.md)) —
+  only knob trading speed against missed facts ([tuning file §2.6](hardware-finetune.md)) —
   **raising the context does not license raising it.** A bigger window is room to *write*,
   not licence to feed the model a longer passage to *read*.
 
@@ -368,3 +368,7 @@ the measurement, not a bug in the corpus. **Never trim the gold list to make it 
 - Reintroduce profiles, a second model, or a non-JSON output mode.
 - Assert an exact fact count in a test.
 - Commit `.gguf` files or binaries to git.
+
+## 8. Primary directives
+
+- YOU SHALL NEVER COMMIT TO GIT
