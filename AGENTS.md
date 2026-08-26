@@ -23,6 +23,12 @@ It does exactly one job. There is no profile system, no second model, no output 
 other than JSON, and **no flags except `--benchmark`**. Model, context and sampling come
 from `settings.json`; input and output filenames are fixed.
 
+A second, much smaller binary ships alongside it: **`checkfacts.exe`** (built from
+`cmd/checkfacts`), which independently re-validates a `result.json` against its source —
+see §5. `build.ps1` builds both; `checkfacts.exe` is not something `fact-extractor.exe` can
+be asked to do, and the two binaries deliberately share no validation code
+(`internal/validate` vs. `internal/facts`).
+
 ### The identity to protect
 
 **A fact extractor whose citations are traceable to the source.** Every `verbatim` span in
@@ -334,8 +340,51 @@ the measurement, not a bug in the corpus. **Never trim the gold list to make it 
 
 ---
 
-## 6. Project conventions
+## 6. Where this stands, and what's next
 
+Current blended score: **76%** (97 gold facts, 74 matched) at `chunk_tokens = 1000` against
+`Qwen2.5-7B-Instruct-1M` Q4_K_M. Three cases fail by design today — `02-research`,
+`04-code-claims`, `05-survey` — and are meant to stay failing until a model does better.
+**Do not raise `benchmark.Threshold` or trim a gold list to make one of them pass**; the
+full per-document account lives in [`README.md`](README.md#the-experiment).
+
+The failures share one shape, diagnostically: the model stops early on text that is not
+narrative prose — code blocks, a plain-text table, a bibliography-style source list,
+subordinate clauses — and hands back a list that is schema-valid but incomplete. Nothing in
+§4 catches that class of failure: the grammar guarantees shape, never exhaustiveness, and no
+sampling parameter in §2.4 of the tuning file touches it either.
+
+Two directions look more promising than further tuning on this hardware, in rough order of
+how directly they attack the failure above:
+
+- **A reasoning-capable model**, given a thinking budget to plan a coverage sweep before
+  closing the fact array, rather than emitting the first list that satisfies the grammar.
+  `hardware-finetune.md` §3 (item 7) has the honest cost: thinking tokens compete with the
+  same output headroom `num_ctx` exists to buy, on a card generating at 25–32 tok/s already.
+- **A model trained on claim-plus-evidence-span data**, not merely fine-tuned for chat.
+  FEVER's evidence-selection stage — pick the sentence supporting a claim — is the same
+  operation as citing a `verbatim` span and targets this project's actual recall problem;
+  its claim-*verification* stage would turn this into a fact checker, which §1 says this
+  project deliberately is not.
+
+Neither direction is trainable on the hardware in `hardware-finetune.md` §1.4 — 6 GB will
+not hold a fine-tuning run over a 7B model, so either would mean a rented GPU. The corpus
+(`corpus/*.gold.json`, 97 hand-written facts) stays a held-out benchmark either way: it is
+sized to score a model, not to train one, and folding it into training data for whatever
+comes next would make every number in §5 meaningless.
+
+---
+
+## 7. Project conventions
+
+- **The schema and the system instruction must stay in sync.** `schemas/facts.json` is the
+  grammar's contract; `system-instruction.md` is the prose that teaches the model what each
+  field and enum value *means*. They can drift silently — a field or category added to one
+  and not explained in the other produces output the grammar allows and the model was never
+  taught. `main_test.go` (`TestSystemInstructionMatchesSchema`,
+  `TestFactTypeVocabularyMatchesSchema`) checks both directions against the embedded
+  copies on every `go test`. Editing either file without re-running the tests is how this
+  drifts.
 - **I/O files:** `system-instruction.md` (prompt), `prompt.md` (input), `result.json`
   (output, shaped by `internal/output` — see §1), `result.raw.txt` (rescued output on
   failure), `settings.json` (configuration). Do not rename these.
@@ -350,7 +399,7 @@ the measurement, not a bug in the corpus. **Never trim the gold list to make it 
 
 ---
 
-## 7. Do not
+## 8. Do not
 
 - Add runtime dependencies on LM Studio, Python, or a bundled `llama-server.exe`. The
   engine is Ollama, reached over HTTP.
@@ -369,6 +418,6 @@ the measurement, not a bug in the corpus. **Never trim the gold list to make it 
 - Assert an exact fact count in a test.
 - Commit `.gguf` files or binaries to git.
 
-## 8. Primary directives
+## 9. Primary directives
 
 - YOU SHALL NEVER COMMIT TO GIT
