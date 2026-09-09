@@ -1,8 +1,10 @@
 // Command fact-extractor turns one text file into a structured, source-traceable
 // list of facts and exits.
 //
-// It does one job. Model, context and sampling come from settings.json; the
-// input and output filenames are fixed. The only flag is --benchmark.
+// It does one job. Context and sampling come from settings.json; the input and
+// output filenames are fixed. The flags are --benchmark, --model (override
+// which Ollama model is used for this run) and --think (ask a reasoning model
+// to think before answering).
 //
 // The Ollama service is managed for the one-shot flow: a service already
 // running is adopted and left alone; otherwise one is started with the tuning
@@ -60,12 +62,26 @@ func main() {
 
 func run() error {
 	bench := flag.Bool("benchmark", false, "score the gold corpus instead of processing prompt.md")
+	model := flag.String("model", "", "Ollama model to use instead of the one in settings.json")
+	think := flag.Bool("think", false, "ask a reasoning model to think before answering")
 	flag.Usage = usage
 	flag.Parse()
 	if flag.NArg() > 0 {
 		usage()
 		return fmt.Errorf("unexpected argument %q", flag.Arg(0))
 	}
+
+	// think is sent to Ollama only when --think was actually passed on the
+	// command line. Unset (nil) leaves the model/template default alone;
+	// --think or --think=true pins it on; --think=false pins it off. This is
+	// the pointer, not the bool, that reaches ollama.Client.Chat.
+	var thinkPtr *bool
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "think" {
+			v := *think
+			thinkPtr = &v
+		}
+	})
 
 	baseDir, err := resolveBaseDir()
 	if err != nil {
@@ -74,6 +90,15 @@ func run() error {
 	cfg, err := settings.Load(baseDir)
 	if err != nil {
 		return err
+	}
+
+	// The model is chosen once, here, before any request is sent, so a single
+	// run names exactly one model. That is what keeps the 6 GB budget safe with
+	// more than one model installed: there is no code path that can put two in
+	// flight. cfg.Ollama.Model is mutated (rather than threading a separate
+	// local through) so runBenchmark's banner names the model actually scored.
+	if m := strings.TrimSpace(*model); m != "" {
+		cfg.Ollama.Model = m
 	}
 
 	system, err := readInstruction(cfg)
@@ -100,7 +125,7 @@ func run() error {
 		return err
 	}
 
-	ex := &extractor{cfg: cfg, client: client, system: system, schema: schema}
+	ex := &extractor{cfg: cfg, client: client, system: system, schema: schema, think: thinkPtr}
 
 	if *bench {
 		return runBenchmark(ex, cfg)
@@ -165,14 +190,16 @@ type extractor struct {
 	client *ollama.Client
 	system string
 	schema json.RawMessage
+	think  *bool // nil = model/template default; see the --think flag in run()
 }
 
 // stats is what a run reports about itself.
 type stats struct {
-	chunks   int
-	promptN  int
-	predictN int
-	verified facts.VerifyResult
+	chunks     int
+	promptN    int
+	predictN   int
+	thinkChars int // length of the reasoning trace, summed across chunks
+	verified   facts.VerifyResult
 }
 
 // extract runs the whole pipeline over one text: split, generate per chunk,
@@ -204,12 +231,13 @@ func (e *extractor) extract(text string, progress bool) (*facts.Document, stats,
 		}
 		res, err := e.client.Chat(
 			[]ollama.Message{sys, {Role: "user", Content: chunk}},
-			e.cfg.Options, e.schema, e.cfg.Ollama.KeepAlive)
+			e.cfg.Options, e.schema, e.cfg.Ollama.KeepAlive, e.think)
 		if err != nil {
 			return nil, st, fmt.Errorf("chunk %d/%d: %w", i+1, len(chunks), err)
 		}
 		st.promptN += res.PromptN
 		st.predictN += res.PredictedN
+		st.thinkChars += len(res.Thinking)
 
 		if progress {
 			if len(chunks) > 1 {
@@ -221,6 +249,9 @@ func (e *extractor) extract(text string, progress bool) (*facts.Document, stats,
 		}
 		if res.Truncated() {
 			return nil, st, e.truncated(res.Content, i, len(chunks))
+		}
+		if leak := thinkingLeak(res.Content); leak != "" {
+			return nil, st, e.leaked(res.Content, leak, i, len(chunks))
 		}
 
 		doc, err := facts.Parse(res.Content)
@@ -308,6 +339,10 @@ func runOnce(e *extractor, cfg *settings.Settings) error {
 	}
 	fmt.Fprintf(os.Stderr, "wrote %s  (%d prompt + %d generated tokens, %s)\n",
 		dest, st.promptN, st.predictN, took(started))
+	if st.thinkChars > 0 {
+		fmt.Fprintf(os.Stderr, "thinking: %d character(s) of reasoning trace, not counted in the facts above\n",
+			st.thinkChars)
+	}
 	return nil
 }
 
@@ -321,6 +356,9 @@ func runBenchmark(e *extractor, cfg *settings.Settings) error {
 
 	fmt.Fprintf(os.Stderr, "benchmarking %s against %d corpus case(s)\n",
 		cfg.Ollama.Model, len(cases))
+	if e.think != nil {
+		fmt.Fprintf(os.Stderr, "thinking: %v (--think)\n", *e.think)
+	}
 	fmt.Fprintf(os.Stderr, "a case passes with at most %d gold facts unmatched\n",
 		benchmark.Threshold)
 	checkPlacement(e)
@@ -438,6 +476,10 @@ func report(r benchmark.Result, st stats, goldN int) {
 	if st.verified.Repaired > 0 {
 		fmt.Fprintf(os.Stderr, "    %d span(s) snapped to the source\n", st.verified.Repaired)
 	}
+	if st.thinkChars > 0 {
+		fmt.Fprintf(os.Stderr, "    %d character(s) of reasoning trace (shares the output budget with the facts above)\n",
+			st.thinkChars)
+	}
 }
 
 // readInstruction prefers the file on disk and falls back to the copy compiled
@@ -481,6 +523,36 @@ func (e *extractor) rawFallback(content string, cause error) error {
 	return fmt.Errorf("%w\nRaw output saved to %s", cause, path)
 }
 
+// thinkingMarkers are the reasoning-channel delimiters a thinking model's
+// template uses (Gemma 4's, specifically). Ollama's builtin parser splits
+// these into message.thinking before content reaches this program, so seeing
+// one here means that split did not happen for this reply.
+var thinkingMarkers = []string{"<|think|>", "<|channel>", "<channel|>"}
+
+// thinkingLeak returns the first thinking-channel marker found in content, or
+// "" if none is present.
+func thinkingLeak(content string) string {
+	for _, m := range thinkingMarkers {
+		if strings.Contains(content, m) {
+			return m
+		}
+	}
+	return ""
+}
+
+// leaked reports a reasoning trace that was not split out of message.content
+// as a distinct, named failure — not a generic JSON parse error — because the
+// cause (Ollama's parser did not engage for this model/reply) is different
+// from a malformed reply and deserves a different fix.
+func (e *extractor) leaked(content, marker string, i, n int) error {
+	path := e.cfg.Resolve("result.raw.txt")
+	_ = os.WriteFile(path, []byte(content), 0o644)
+	return fmt.Errorf("chunk %d/%d: the reasoning trace was not split out of the reply "+
+		"(found %q in message.content)\n"+
+		"Raw output saved to %s. This model's thinking is not being parsed by Ollama as expected.",
+		i+1, n, marker, path)
+}
+
 // resolveBaseDir finds the directory holding settings.json and the data files:
 // the one containing the executable, or the working directory when running
 // under `go run`, which builds into a temp directory.
@@ -503,13 +575,18 @@ func resolveBaseDir() (string, error) {
 func usage() {
 	fmt.Fprint(os.Stderr, `fact-extractor `+version+` - extract source-traceable facts from a text file
 
-Usage: fact-extractor [--benchmark]
+Usage: fact-extractor [--benchmark] [--model <name>] [--think]
 
-  (no flags)     `+promptFile+` -> `+outputFile+`
-  --benchmark    score the gold corpus in `+corpusDir+`/ and exit 0 or 1
+  (no flags)      `+promptFile+` -> `+outputFile+`
+  --benchmark     score the gold corpus in `+corpusDir+`/ and exit 0 or 1
+  --model <name>  use this Ollama model instead of the one in settings.json
+                  (build.ps1 creates "fact-extractor-gemma4" alongside the default,
+                  if the Gemma 4 GGUF is present)
+  --think         ask a reasoning model to think before answering; the trace is
+                  reported (character count) but not written to the output
 
-Model, context and sampling come from settings.json, which is produced by the
-build. The Ollama service is started if none is running (see settings.json), and
+Context and sampling come from settings.json, which is produced by the build.
+The Ollama service is started if none is running (see settings.json), and
 stopped again on exit; a service found already running is used and left alone.
 `)
 }

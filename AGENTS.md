@@ -15,13 +15,18 @@ A Windows CLI in **Go** (`fact-extractor.exe`) that turns one text file into a s
 **source-traceable** list of facts, and exits.
 
 ```powershell
-fact-extractor.exe              # system-instruction.md + prompt.md -> result.json
-fact-extractor.exe --benchmark  # score the gold corpus, exit 0 or 1
+fact-extractor.exe                                        # system-instruction.md + prompt.md -> result.json
+fact-extractor.exe --benchmark                             # score the gold corpus, exit 0 or 1
+fact-extractor.exe --model fact-extractor-gemma4 --think   # a different Ollama model, thinking on
 ```
 
-It does exactly one job. There is no profile system, no second model, no output format
-other than JSON, and **no flags except `--benchmark`**. Model, context and sampling come
-from `settings.json`; input and output filenames are fixed.
+It does exactly one job. There is no profile system and no output format other than JSON.
+The CLI takes exactly three flags: `--benchmark`, `--model` (name a different Ollama model
+for this run) and `--think` (send `think` explicitly to a reasoning model). Neither
+overrides more than the one setting it names — `--model` overrides `ollama.model`, `--think`
+overrides the request's `think` field, and both apply only for the run, never to disk. See
+§2's Configuration section for the boundary that keeps this from becoming a profile system.
+Context and sampling still come from `settings.json`; input and output filenames are fixed.
 
 A second, much smaller binary ships alongside it: **`checkfacts.exe`** (built from
 `cmd/checkfacts`), which independently re-validates a `result.json` against its source —
@@ -158,6 +163,16 @@ file is right.
 **Keep the Modelfile free of `PARAMETER` lines.** They become defaults that request options
 override, which is two sources of truth for one value.
 
+**`--model` and `--think` override one field each, for the run only, never the file.**
+`--model` replaces `cfg.Ollama.Model` in memory after `settings.Load` and before
+`ollama.New`; `--think` sets the request's `think` field explicitly (nil when unset, so an
+ordinary run's wire format is unchanged). Neither writes `settings.json`, neither adds a
+second block of settings, and neither is read back from disk — the boundary that keeps this
+from being the profile system §8 rules out. `build.ps1`'s `$models` list can create more
+than one Ollama model (the default `settings.json` names, plus any reachable only through
+`--model`), but `settings.json`'s shape does not change: `source_model` still records
+provenance for the default model alone.
+
 ### Execution flow
 
 ```
@@ -263,12 +278,26 @@ Three mechanisms, three jobs. Do not credit one with another's work.
 **Never write a test that asserts an exact fact count.** Assert traceability and a
 plausible floor.
 
+**A reasoning model adds a new way to reach the second class.** Thinking and content tokens
+share one output budget with no separate accounting (`hardware-finetune.md` §1.8, §3 item
+7) — a long enough trace can exhaust the budget before the fact array closes, which is the
+same silent-truncation failure as above, reached by spending the budget on reasoning instead
+of an oversized chunk. `res.Truncated()` (`done_reason: "length"`) still catches it the same
+way; nothing about `--think` bypasses that check.
+
 ---
 
 ## 5. Benchmark mode
 
 `--benchmark` exists to answer one question: **did a new model, or an edited
 `system-instruction.md`, make extraction worse?** It is not a general eval workbench.
+
+**Pointing it at a new model:** add the `.gguf` and an entry in `build.ps1`'s `$models`
+list, rebuild, then `fact-extractor.exe --model <name> --benchmark` (add `--think` for a
+reasoning model). This is exactly how the Gemma 4 comparison in `README.md` was produced —
+`--model` and `--benchmark` compose freely, and `runBenchmark`'s banner names whichever
+model `cfg.Ollama.Model` was resolved to, so the printed header always matches what was
+actually scored.
 
 Each corpus entry pairs a source text with gold facts anchored to source spans:
 
@@ -342,33 +371,45 @@ the measurement, not a bug in the corpus. **Never trim the gold list to make it 
 
 ## 6. Where this stands, and what's next
 
-Current blended score: **76%** (97 gold facts, 74 matched) at `chunk_tokens = 1000` against
-`Qwen2.5-7B-Instruct-1M` Q4_K_M. Three cases fail by design today — `02-research`,
-`04-code-claims`, `05-survey` — and are meant to stay failing until a model does better.
-**Do not raise `benchmark.Threshold` or trim a gold list to make one of them pass**; the
-full per-document account lives in [`README.md`](README.md#the-experiment).
+Two models have been scored so far, same corpus, same `system-instruction.md`,
+`chunk_tokens = 1000`: **76%** (97 gold facts, 74 matched) against
+`Qwen2.5-7B-Instruct-1M` Q4_K_M, and **86%** (83 matched) against `Gemma 4 E2B QAT` with
+`--think` (`fact-extractor-gemma4`). Two cases fail by design under Gemma today —
+`04-code-claims`, `05-survey` — down from three under Qwen (`02-research` now scores a clean
+18/18). **Do not raise `benchmark.Threshold` or trim a gold list to make either pass**; the
+full per-document account for both models lives in
+[`README.md`](README.md#the-experiment).
 
-The failures share one shape, diagnostically: the model stops early on text that is not
-narrative prose — code blocks, a plain-text table, a bibliography-style source list,
-subordinate clauses — and hands back a list that is schema-valid but incomplete. Nothing in
-§4 catches that class of failure: the grammar guarantees shape, never exhaustiveness, and no
-sampling parameter in §2.4 of the tuning file touches it either.
+The remaining failures share one shape, diagnostically, under both models: the model stops
+early on text that is not narrative prose — code blocks, a plain-text table, a
+bibliography-style source list, subordinate clauses — and hands back a list that is
+schema-valid but incomplete. Nothing in §4 catches that class of failure on its own: the
+grammar guarantees shape, never exhaustiveness, and no sampling parameter in §2.4 of the
+tuning file touches it either.
 
-Two directions look more promising than further tuning on this hardware, in rough order of
-how directly they attack the failure above:
+**A reasoning-capable model was the first of two directions this section named as more
+promising than further tuning — it has now been tried, not just predicted.**
+`hardware-finetune.md` §1.8 has the full measurement: Gemma's thinking budget appears to buy
+something closer to a coverage sweep before the array closes, most visibly on
+`02-research`'s qualifiers and appositives coming out as separate facts instead of folding
+into a headline claim. The honest cost predicted in §3 item 7 landed too — thinking and
+content tokens share one output budget with no separate accounting, confirmed directly
+(~2.4× the generation tokens for one chunk) — though on a smaller, faster model the
+wall-clock cost is less severe than that prediction worried, even after paying it. What
+remains open: whether this generalizes past one small model, and whether a larger reasoning
+model closes the two remaining probes rather than only narrowing them.
 
-- **A reasoning-capable model**, given a thinking budget to plan a coverage sweep before
-  closing the fact array, rather than emitting the first list that satisfies the grammar.
-  `hardware-finetune.md` §3 (item 7) has the honest cost: thinking tokens compete with the
-  same output headroom `num_ctx` exists to buy, on a card generating at 25–32 tok/s already.
+A second direction remains untried:
+
 - **A model trained on claim-plus-evidence-span data**, not merely fine-tuned for chat.
   FEVER's evidence-selection stage — pick the sentence supporting a claim — is the same
   operation as citing a `verbatim` span and targets this project's actual recall problem;
   its claim-*verification* stage would turn this into a fact checker, which §1 says this
   project deliberately is not.
 
-Neither direction is trainable on the hardware in `hardware-finetune.md` §1.4 — 6 GB will
-not hold a fine-tuning run over a 7B model, so either would mean a rented GPU. The corpus
+This direction is not trainable on the hardware in `hardware-finetune.md` §1.4 — 6 GB will
+not hold a fine-tuning run over a 7B-class model, so it would mean a rented GPU, unlike the
+reasoning-model comparison above, which ran entirely on this machine. The corpus
 (`corpus/*.gold.json`, 97 hand-written facts) stays a held-out benchmark either way: it is
 sized to score a model, not to train one, and folding it into training data for whatever
 comes next would make every number in §5 meaningless.
@@ -413,8 +454,12 @@ comes next would make every number in §5 meaningless.
 - Renumber ids when splitting the output into arrays, or partition those arrays on anything
   other than whether `verbatim` is null.
 - Report a `position` that nothing independently checked.
-- Add flags. The CLI takes `--benchmark` and nothing else.
-- Reintroduce profiles, a second model, or a non-JSON output mode.
+- Add flags beyond `--benchmark`, `--model` and `--think`. Each overrides exactly one
+  `settings.json` field for the run and nothing else — a fourth flag needs the same
+  justification these two got, not a default yes.
+- Reintroduce profiles (a `models` block, an alias map, per-model `options`) or a non-JSON
+  output mode. `--model` names an Ollama model directly; it is not a profile system, and
+  `settings.json`'s shape does not change to support it — see §2's Configuration section.
 - Assert an exact fact count in a test.
 - Commit `.gguf` files or binaries to git.
 

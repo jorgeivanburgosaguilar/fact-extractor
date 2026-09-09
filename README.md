@@ -4,54 +4,104 @@
 out of a piece of text?**
 
 Toy in scope, not in method. To answer that honestly you need a fair contest, so the
-project is really three things: a CLI that makes a 7B model extract facts and *proves* every
-citation against the source, a corpus of documents I read and extracted by hand, and a
-benchmark that scores the model against my answers.
+project is really three things: a CLI that makes a small local model extract facts and
+*proves* every citation against the source, a corpus of documents I read and extracted by
+hand, and a benchmark that scores a model against my answers.
 
 ```powershell
-fact-extractor.exe              # prompt.md -> result.json
-fact-extractor.exe --benchmark  # score the model against my hand-extracted corpus
+fact-extractor.exe                                        # prompt.md -> result.json
+fact-extractor.exe --benchmark                             # score the default model
+fact-extractor.exe --model fact-extractor-gemma4 --think   # use Gemma 4, thinking on
 ```
 
-Model, context and sampling come from `settings.json`, which the build generates. There are
-no other flags.
+Context and sampling come from `settings.json`, which the build generates. `--model`
+overrides which Ollama model a run uses (the default still comes from `settings.json`);
+`--think` asks a reasoning model to think before answering. Neither touches
+`settings.json` on disk.
 
 ## The experiment
 
 Five documents, each read and extracted by hand *first* — the gold list is what I found,
-every entry anchored to an exact source span. The model then sees the same document, the
+every entry anchored to an exact source span. Each model then sees the same document, the
 same [`system-instruction.md`](system-instruction.md), greedy decoding, chunked at 1000
 estimated tokens. One run per case, scored against my list.
 
+Two models have been run through this so far: **Qwen2.5-7B-Instruct-1M**, the original
+baseline, and **Gemma 4 E2B QAT**, a much smaller reasoning model run with thinking on
+(`--think`). The system instruction is identical for both — it's half the experiment, and
+editing it would make every number below incomparable to a re-run — but **two variables
+differ between the columns, not one**: the model itself, and Gemma's thinking budget. This
+is a "what does a small reasoning model do here" result, not an isolated model swap; see
+[The reasoning-model result](#the-reasoning-model-result) below for what thinking on its own
+appears to buy.
+
 ### The scoreboard
 
-| Document | My facts | Model found | |
-|---|---:|---:|---|
-| `01-news` — press release | 17 | 16 | |
-| `02-research` — dense academic prose | 18 | 14 | |
-| `03-long-report` — long mixed report | 23 | 23 | |
-| `04-code-claims` — prose *about code* | 16 | 8 | capability probe |
-| `05-survey` — dense multi-source literature review | 23 | 13 | multi-chunk density probe |
-| **Total** | **97** | **74** | **76%** |
+| Document | My facts | Qwen2.5-7B | Gemma 4 E2B (thinking) | |
+|---|---:|---:|---:|---|
+| `01-news` — press release | 17 | 16 | 16 | |
+| `02-research` — dense academic prose | 18 | 14 | **18** | |
+| `03-long-report` — long mixed report | 23 | **23** | 22 | |
+| `04-code-claims` — prose *about code* | 16 | 8 | 11 | capability probe |
+| `05-survey` — dense multi-source literature review | 23 | 13 | 16 | multi-chunk density probe |
+| **Total** | **97** | **74 (76%)** | **83 (86%)** | |
 
-Measured at `chunk_tokens = 1000`.
+Measured at `chunk_tokens = 1000`. Bold marks the model that found more on that document.
 
-#### The model
+#### The models
 
-| | |
-|---|---|
-| Model | `Qwen2.5-7B-Instruct-1M`, Q4_K_M GGUF (~4.68 GB) |
-| Served by | Ollama (llama.cpp, CUDA), `POST /api/chat`, `keep_alive: 0` |
-| Decoding | greedy — `temperature 0.0`, `top_k 1`, `repeat_penalty 1.0`, `seed 42` |
-| Context / chunk | `num_ctx 16384` · `chunk_tokens 1000` |
-| System instruction | [`system-instruction.md`](system-instruction.md) — the exact prompt used for these numbers |
-| Output contract | [`schemas/facts.json`](schemas/facts.json), sent as `format` (GBNF-constrained) |
-| Throughput | ~32 tok/s generation, model fully GPU-resident |
+| | Qwen2.5-7B-Instruct-1M | Gemma 4 E2B QAT |
+|---|---|---|
+| File | Q4_K_M GGUF, 4.68 GB (4683073888 bytes) | Q4_0 GGUF, 3.35 GB (3349515424 bytes) |
+| Served by | Ollama (llama.cpp, CUDA), `POST /api/chat`, `keep_alive: 0` | same |
+| Decoding | greedy — `temperature 0.0`, `top_k 1`, `repeat_penalty 1.0`, `seed 42` | same |
+| Context / chunk | `num_ctx 16384` · `chunk_tokens 1000` | same |
+| Thinking | not applicable | **on** (`--think`) — Ollama's `gemma4` parser splits the trace into `message.thinking`; `message.content` stays clean JSON, verified for every run in this table |
+| System instruction | same — [`system-instruction.md`](system-instruction.md), unedited between runs | same |
+| Output contract | same — [`schemas/facts.json`](schemas/facts.json), sent as `format` (GBNF-constrained), honoured with thinking on | same |
+| Throughput | ~32 tok/s generation, fully GPU-resident | ~58 tok/s generation, fully GPU-resident, but thinking tokens and content tokens draw from the *same* output budget — see below |
+| VRAM (whole system, `num_ctx 16384`) | 5587 MiB (measured, `hardware-finetune.md` §1.5) | 2161 MiB (measured) |
 
 The system instruction is linked because it's half the experiment: one edit to its
-extraction rules and every number above stops being comparable to a re-run.
+extraction rules and every number above stops being comparable to a re-run. It was **not**
+adapted for Gemma's thinking — see the note at the end of this section.
+
+### The reasoning-model result
+
+Gemma's thinking trace costs real tokens: on `01-news` alone it runs 6364–7203 characters
+per chunk, and the five-case benchmark spent about 54,000 characters of reasoning in total
+against 233 raw extracted facts. `eval_count` on a single chunk went from 1452 tokens with
+`--think=false` to 3442 with it on — roughly **2.4×** the generation cost for that one
+chunk, confirmed with a direct `think:true` vs `think:false` probe against the live model
+before any benchmark ran (`hardware-finetune.md` §3 has the full comparison). That is the
+predicted cost `hardware-finetune.md` named before this model was ever run: thinking and
+content tokens share one output budget, with no separate accounting.
+
+What that spend buys, on this evidence: `02-research` — Qwen's worst case, losing a third of
+its gold list to subordinate clauses and qualifiers — goes to a **clean 18/18 sweep** with
+thinking on. `04-code-claims` and `05-survey`, the two capability probes that are *meant* to
+stay hard, both improve (8→11, 13→16) without closing entirely. Citation quality also moves:
+Gemma's total failed-citation count across all five cases is 8, against Qwen's 21 on
+`05-survey` alone. The one case that gets slightly worse is `03-long-report` (23→22), losing
+a single figure (`£46,000 per station`) that Qwen caught — not a pattern, on this evidence.
+
+None of this isolates *thinking* from *model* — a smaller model with a different
+architecture is also a variable — but the composition (thinking on, same day, same
+hardware, same prompt, same schema) is exactly the reasoning-capable-model experiment this
+project's "Where this goes next" section named as the obvious next step, back when the
+answer was still a prediction rather than a measurement.
+
+**On `system-instruction.md`:** before deciding whether to adapt it for a reasoning model, a
+direct probe sent the real system instruction, the real schema, and a real corpus document
+to Gemma three ways — `think` omitted, `true`, `false` — and read back `message.thinking`
+and `message.content` separately. The reasoning trace never once leaked into `content`;
+`content` was clean, schema-valid JSON in every case. On that evidence the instruction was
+left frozen: there was no technical problem to fix, and editing it would have made the Qwen
+column above incomparable, forcing a re-run of a model whose numbers already stand.
 
 ### Document by document
+
+#### Qwen2.5-7B-Instruct-1M
 
 - **`01-news` — 16/17.** The model actually returned 19 facts against my 17, and still lost
   a point: two of the 19 restate the same claim in different words. A duplicate can't be
@@ -85,12 +135,42 @@ extraction rules and every number above stops being comparable to a re-run.
   here (21) than on any other case combined — dense, attribution-heavy, list-shaped prose is
   where the model both skims hardest and misquotes most.
 
+#### Gemma 4 E2B QAT, thinking on
+
+- **`01-news` — 16/17.** Same score as Qwen, different miss: it dropped "founded in 1984 in
+  Bremerhaven" rather than losing a point to a near-duplicate. One classified fact and one
+  failed citation on an otherwise clean single chunk.
+- **`02-research` — 18/18.** A clean sweep on exactly the document Qwen loses the most on.
+  The qualifiers and appositives that Qwen folds into a headline claim — the case
+  `system-instruction.md`'s "three facts per sentence" rule targets and, per the Qwen
+  write-up above, holds least on — come out as separate facts here. The most direct evidence
+  in this whole comparison that the thinking budget is buying a coverage sweep rather than
+  just more tokens.
+- **`03-long-report` — 22/23.** Nearly the same clean result as Qwen, missing only
+  "Replacement cost is estimated at £46,000 per station" — a single figure, not a pattern.
+- **`04-code-claims` — 11/16.** Still the harder of the two capability probes, and still
+  failing by the same shape Qwen fails by: the five misses are all evidence spans sitting
+  inside the code blocks (an `fmt.Errorf` call, a doc comment, two `return` statements, an
+  `EqualFold` call), while the prose halves of the same claim/evidence pairs come through.
+  Better than Qwen's 8/16, not a different failure mode.
+- **`05-survey` — 16/23.** Still the hardest case by a wide margin, and still missing from
+  the same two places: the tab-separated table (misses every figure drawn from it) and the
+  attribution-heavy interview/methodology prose around it. Genuinely better than Qwen's
+  13/23, and with far fewer failed citations along the way (7 here against Qwen's 21) — but
+  dense, list-shaped, non-narrative text is still where this comparison's advantage narrows
+  the most.
+
 ### The verdict
 
-So: better than me at long, well-structured reports. Reliably worse on dense academic prose,
-worse at reading code, and worse again on dense multi-source citation lists and tables — the
-non-narrative shapes, consistently. **`--benchmark` exits non-zero on purpose** — three cases
-fail today and are meant to stay failing until a model does better.
+Both models are better than me at long, well-structured reports, and both are reliably
+worse on dense academic prose, code, and multi-source citation lists and tables — the
+non-narrative shapes, consistently. What differs is *how much* worse: Gemma with thinking
+closes most of Qwen's gap on dense academic prose entirely (`02-research`, 14/18 → 18/18)
+and narrows it meaningfully on the two shapes that are hardest by design (`04-code-claims`,
+`05-survey`). **`--benchmark` exits non-zero on purpose** for both models today —
+`04-code-claims` and `05-survey` fail under Gemma too, and are meant to stay failing until a
+model closes them, per `AGENTS.md` §5: they measure surfacing and coverage under stress, not
+a bar either model is expected to clear soon.
 
 ## The guarantee that makes it a fair contest
 
@@ -253,25 +333,35 @@ supported target.
 
 ## Getting the model
 
-The build looks for the GGUF in two places, in order:
+`build.ps1` creates **up to two** Ollama models, each independently optional — a missing
+GGUF skips only that entry, never the build:
 
-1. `models\Qwen2.5-7B-Instruct-1M-Q4_K_M.gguf` next to the repo
-2. a hardcoded development path
+| Model | Default `.gguf` locations (tried in order) | Ollama name |
+|---|---|---|
+| Qwen2.5-7B-Instruct-1M (the default `settings.json` names) | `models\Qwen2.5-7B-Instruct-1M-Q4_K_M.gguf` next to the repo, then a hardcoded development path | `fact-extractor` |
+| Gemma 4 E2B QAT (reachable only via `--model`) | `models\gemma-4-E2B-it-QAT-Q4_0.gguf` next to the repo, then a hardcoded development path | `fact-extractor-gemma4` |
 
-Download `Qwen2.5-7B-Instruct-1M-Q4_K_M.gguf` from
-[lmstudio-community](https://huggingface.co/lmstudio-community) and drop it in `models\`, or
-edit `$ggufCandidates` at the top of `build.ps1` to point wherever you keep it. If no GGUF
-is found the build still succeeds — it skips model creation and prints the paths it looked
-in. (If Ollama simply isn't on `PATH`, it prints the `ollama create` command to run later.)
+Download `Qwen2.5-7B-Instruct-1M-Q4_K_M.gguf` and `gemma-4-E2B-it-QAT-Q4_0.gguf` from
+[lmstudio-community](https://huggingface.co/lmstudio-community) and drop them in `models\`,
+or edit `$models` at the top of `build.ps1` to point wherever you keep them. Ignore the
+sibling `mmproj-*.gguf` next to the Gemma download — that's the vision projector, unused
+here. If neither GGUF is found the build still succeeds — it skips model creation and prints
+the paths it looked in for each. (If Ollama simply isn't on `PATH`, it prints the
+`ollama create` command to run later, one per resolved model.)
 
-**Using a different model?** Point `$ggufCandidates` at it and check its trained context
-with `ollama show <model>` afterwards. A model trained below `num_ctx` (16384) degrades
-silently rather than refusing.
+**Using a different model?** Add an entry to `$models` in `build.ps1` and check its trained
+context with `ollama show <model>` afterwards. A model trained below `num_ctx` (16384)
+degrades silently rather than refusing. Run it with `--model <name>`; if it's a reasoning
+model, `--think` is there too — but check first whether Ollama's builtin parser actually
+splits its thinking channel out of `message.content` (`hardware-finetune.md` §3 shows how
+this project probed that for Gemma before trusting it), because a model whose thinking
+leaks into content fails extraction with a named, saved-to-`result.raw.txt` error rather
+than silently corrupting output.
 
 ## Setup
 
 ```powershell
-.\build.ps1          # builds dist\, creates the Ollama model, writes settings.json
+.\build.ps1          # builds dist\, creates both Ollama models, writes settings.json
 cd dist
 ```
 
@@ -339,15 +429,17 @@ avoid facts about an *absence* — they have no span to cite, so they cannot be 
 | Output cut off, `result.raw.txt` written | Generation hit the token cap. Lower `chunk_tokens`. |
 | Extraction runs for many minutes | Some models never emit a stop token. There is no `num_predict` cap in `settings.json` — add one if you are experimenting with unfamiliar models. |
 | `--benchmark` prints a `WARNING: the model is only ...` placement notice | The preflight check found less than 100% GPU residency; the run that follows isn't comparable to the recorded numbers. Same fix as the first row. |
-| `--benchmark` exits 1 | Expected. Three cases fail by design; see the scoreboard. |
+| `--benchmark` exits 1 | Expected. Some cases fail by design under every model tried so far; see the scoreboard. |
+| `has no model named "..."` after `--model <name>` | That model was never created — either its `.gguf` was missing at build time, or the name is misspelled. `Preflight` lists what's actually available; re-run `build.ps1` after fixing `$models` or getting the `.gguf`. |
+| `--model` names a model whose thinking leaks into `message.content` | Extraction fails with a named error (not silent corruption) and saves the raw reply to `result.raw.txt`. Means Ollama's builtin parser for that architecture isn't splitting the reasoning channel out — check with a direct probe before trusting `--think` on an unfamiliar model, the way `hardware-finetune.md` §3 did for Gemma 4. |
 
 ## Documentation
 
 - **[`AGENTS.md`](AGENTS.md)** — what this project is, the architecture, and the rules for
   changing it. The specification.
 - **[`hardware-finetune.md`](hardware-finetune.md)** — every number that exists because of
-  this specific GPU and model: measured VRAM budget, context scaling, sampling, and the
-  Ollama service settings the budget depends on.
+  this specific GPU and the models run on it: measured VRAM budget, context scaling,
+  sampling, and the Ollama service settings the budget depends on.
 - **[`system-instruction.md`](system-instruction.md)** — the exact prompt behind every score
   above. Editing it is what most changes the numbers; diff it before you diff anything else.
 
@@ -360,10 +452,13 @@ This project is a thin thing standing on some very substantial ones.
 - **[llama.cpp](https://github.com/ggml-org/llama.cpp)** — the inference engine inside
   Ollama, and the GBNF grammar machinery that makes schema-constrained JSON output a
   guarantee rather than a request politely worded in a prompt.
-- **[Qwen2.5](https://github.com/QwenLM/Qwen2.5)** by the Qwen team at Alibaba — the model
-  doing the actual work, in its 7B-Instruct-1M variant.
+- **[Qwen2.5](https://github.com/QwenLM/Qwen2.5)** by the Qwen team at Alibaba — the original
+  baseline model, in its 7B-Instruct-1M variant.
+- **[Gemma](https://ai.google.dev/gemma)** by Google DeepMind — the reasoning-model
+  comparison, in its 4 E2B QAT variant. Its chat template and thinking-channel protocol are
+  what Ollama's `gemma4` builtin parser splits `message.thinking` from `message.content` on.
 - **[lmstudio-community](https://huggingface.co/lmstudio-community)** — the GGUF
-  quantization used here.
+  quantizations used here, for both models.
 - **[Go](https://go.dev)** — the whole CLI is standard library. No dependency tree, one
   static binary.
 - **[llmfit](https://github.com/AlexsJones/llmfit)** — used to estimate model/hardware fit
@@ -379,14 +474,25 @@ Nothing forces it to keep going. The grammar guarantees shape, never exhaustiven
 a legal token after any finished fact object — and no sampling parameter available today
 addresses that (`hardware-finetune.md` §2.8).
 
-Two directions look more promising than tuning this setup further:
+**A reasoning-capable model was the first of two directions this project named as more
+promising than tuning further — it has now been tried, not just predicted.** Gemma 4 E2B
+with `--think` closes `02-research` entirely (14/18 → 18/18) and narrows both remaining
+capability probes (`04-code-claims` 8→11, `05-survey` 13→16) without closing them, on a model
+under a third the size of Qwen. The mechanism looks like the one predicted: a thinking budget
+appears to buy something closer to a coverage sweep before the array closes, rather than the
+model taking the first list that satisfies the grammar — most visible on `02-research`, where
+the qualifiers and appositives Qwen collapses into a headline claim come out as separate
+facts instead. The honest cost also landed as predicted: thinking and content tokens draw
+from the same output budget with no separate accounting, and it is a real cost — roughly
+2.4× the generation tokens for a single chunk in a direct `think:true` vs `think:false`
+probe (`hardware-finetune.md` §3) — not a rounding error. What is not yet known: whether this
+generalizes past one small model and one document set, whether a larger reasoning model
+would close the two remaining probes rather than merely narrow them, and how the thinking
+cost scales on `05-survey`'s three-chunk case specifically, where it's most expensive. The
+full comparison is in [the scoreboard above](#the-scoreboard).
 
-- **A reasoning-capable model.** Given a thinking budget, a model could plan something like a
-  sentence-by-sentence sweep and check its own coverage before it commits to closing the
-  array — attacking the "the grammar permits stopping" cause directly, which no sampling
-  parameter can touch. The honest cost: thinking tokens compete for the same output headroom
-  `num_ctx 16384` exists to buy, on a card that generates at 25–32 tok/s to begin with
-  (`hardware-finetune.md` §3).
+A second direction remains untried:
+
 - **A model trained for this task, not for chat.** An instruct model is tuned to be helpful
   and concise; this job wants exhaustive, and those two objectives pull against each other on
   every dense paragraph in this corpus. The data shape that actually matches is *claim plus
@@ -400,11 +506,14 @@ Two directions look more promising than tuning this setup further:
   — though the contradicting pairs planted in `04-code-claims` sit right next door to that
   line. Open information extraction corpora (CaRB, LSOIE) are a closer match for exhaustive,
   clause-level extraction specifically, and SciFact is worth a look for the dense scientific
-  prose that `02-research` loses on.
+  prose that Qwen loses on (`02-research`) — the case Gemma's thinking, above, already closes
+  without any training at all.
 
-Neither of these happens on this machine — 6 GB won't hold even a QLoRA run over a 7B model,
-so fine-tuning would mean renting a GPU elsewhere. And the corpus in `corpus/` is 97
-hand-written facts, sized to be a benchmark, not a training set; it should stay held out
-rather than folded into training data for whatever comes next. Whichever direction gets
-tried, it gets scored exactly the way the model above was: the same gold list, the same
-one-to-one matching, the same verification pass. `--benchmark` is the gate either way.
+This one does not happen on this machine — 6 GB won't hold even a QLoRA run over a 7B model,
+so fine-tuning would mean renting a GPU elsewhere; unlike the reasoning-model comparison
+above, which is inference-only and ran entirely on the hardware in `hardware-finetune.md`
+§1. The corpus in `corpus/` is 97 hand-written facts, sized to be a benchmark, not a
+training set; it should stay held out rather than folded into training data for whatever
+comes next. Whichever model gets tried next, it gets scored exactly the way both models
+above were: the same gold list, the same one-to-one matching, the same verification pass.
+`--benchmark` is the gate either way.
