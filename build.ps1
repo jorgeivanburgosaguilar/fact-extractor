@@ -11,12 +11,17 @@ $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $dist = Join-Path $root 'dist'
 
-# The .gguf the Ollama model is created from. Tried next to the repo first, then
-# the development path, so the same script works on either.
+# The Ollama models this build creates. The first is the default that
+# settings.json names; the rest exist only so --model can score them on the same
+# corpus. Each is optional - a missing .gguf skips that model, not the build.
 $modelName = 'fact-extractor'
-$ggufCandidates = @(
-    (Join-Path $root 'models\Qwen2.5-7B-Instruct-1M-Q4_K_M.gguf'),
-    'D:\Modelos\lmstudio-community\Qwen2.5-7B-Instruct-1M-GGUF\Qwen2.5-7B-Instruct-1M-Q4_K_M.gguf'
+$models = @(
+    @{ name = 'fact-extractor'; modelfile = 'Modelfile'; candidates = @(
+        (Join-Path $root 'models\Qwen2.5-7B-Instruct-1M-Q4_K_M.gguf'),
+        'D:\Modelos\lmstudio-community\Qwen2.5-7B-Instruct-1M-GGUF\Qwen2.5-7B-Instruct-1M-Q4_K_M.gguf') }
+    @{ name = 'fact-extractor-gemma4'; modelfile = 'Modelfile.gemma4'; candidates = @(
+        (Join-Path $root 'models\gemma-4-E2B-it-QAT-Q4_0.gguf'),
+        'D:\Modelos\lmstudio-community\gemma-4-E2B-it-QAT-GGUF\gemma-4-E2B-it-QAT-Q4_0.gguf') }
 )
 
 New-Item -ItemType Directory -Force -Path $dist, "$dist\corpus", "$dist\schemas" | Out-Null
@@ -95,25 +100,32 @@ function New-OllamaModel([string]$name, [string]$gguf, [string]$modelfilePath) {
     if ($LASTEXITCODE -ne 0) { throw "ollama create failed for $name" }
 }
 
-$gguf = $ggufCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-
-if (-not $gguf) {
-    Write-Host 'No .gguf found - skipping model creation. Looked in:' -ForegroundColor Yellow
-    $ggufCandidates | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
+# Resolve each entry's candidates to the first path that exists. A model whose
+# .gguf is not found is skipped - the build still succeeds, and --model against
+# it later fails with an actionable Preflight error naming what is available.
+foreach ($m in $models) {
+    $m.gguf = $m.candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $m.gguf) {
+        Write-Host "No .gguf found for '$($m.name)' - skipping its creation. Looked in:" -ForegroundColor Yellow
+        $m.candidates | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
+    }
 }
+$resolved = $models | Where-Object { $_.gguf }
 
 $ollamaOnPath = [bool](Get-Command ollama -ErrorAction SilentlyContinue)
-if ($gguf -and -not $ollamaOnPath) {
+if ($resolved -and -not $ollamaOnPath) {
     Write-Host 'ollama is not on PATH - skipping model creation.' -ForegroundColor Yellow
-    Write-Host "  Run later:  ollama create $modelName -f $dist\Modelfile" -ForegroundColor Yellow
+    foreach ($m in $resolved) {
+        Write-Host "  Run later:  ollama create $($m.name) -f $dist\$($m.modelfile)" -ForegroundColor Yellow
+    }
 }
 
 $startedOllama = $null
-if ($gguf -and $ollamaOnPath) {
+if ($resolved -and $ollamaOnPath) {
     if (Test-OllamaUp) {
         Write-Host 'using the Ollama service already running (it will be left running).' -ForegroundColor DarkGray
     } else {
-        Write-Host 'starting ollama serve so the model can be created' -ForegroundColor Cyan
+        Write-Host 'starting ollama serve so models can be created' -ForegroundColor Cyan
         $startedOllama = Start-Process -FilePath 'ollama' -ArgumentList 'serve' -PassThru -WindowStyle Hidden
         $deadline = (Get-Date).AddSeconds(60)
         while (-not (Test-OllamaUp)) {
@@ -126,7 +138,9 @@ if ($gguf -and $ollamaOnPath) {
     }
 
     try {
-        New-OllamaModel $modelName $gguf (Join-Path $dist 'Modelfile')
+        foreach ($m in $resolved) {
+            New-OllamaModel $m.name $m.gguf (Join-Path $dist $m.modelfile)
+        }
     } finally {
         # Stop only what this script started; leave a service the user was
         # already running alone. Killing the tree matters - the runner
@@ -138,7 +152,10 @@ if ($gguf -and $ollamaOnPath) {
     }
 }
 
-if (-not $gguf) { $gguf = $ggufCandidates[0] }
+# source_model records provenance for the default model only - settings.json's
+# shape does not change. A skipped default still needs a value recorded.
+$gguf = $models[0].gguf
+if (-not $gguf) { $gguf = $models[0].candidates[0] }
 
 # ---------------------------------------------------------------------------
 # settings.json - generated here, read-only at run time
@@ -182,6 +199,13 @@ Write-Host 'wrote settings.json' -ForegroundColor Cyan
 Write-Host ''
 Write-Host "dist ready: $dist" -ForegroundColor Green
 Get-ChildItem $dist -Name | Sort-Object | ForEach-Object { Write-Host "  $_" }
+
+$alternates = $resolved | Where-Object { $_.name -ne $models[0].name }
+if ($alternates) {
+    Write-Host ''
+    Write-Host 'Also created, reachable with --model:' -ForegroundColor Cyan
+    foreach ($m in $alternates) { Write-Host "  $($m.name)" -ForegroundColor Cyan }
+}
 
 # These three are service-level and cannot live in settings.json. The VRAM
 # budget in hardware-finetune.md depends on them, so a missing one is worth

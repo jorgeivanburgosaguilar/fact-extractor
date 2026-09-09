@@ -46,11 +46,13 @@ type chatRequest struct {
 	KeepAlive int             `json:"keep_alive"`
 	Format    json.RawMessage `json:"format,omitempty"`
 	Options   map[string]any  `json:"options,omitempty"`
+	Think     *bool           `json:"think,omitempty"`
 }
 
 type chatResponse struct {
 	Message struct {
-		Content string `json:"content"`
+		Content  string `json:"content"`
+		Thinking string `json:"thinking"`
 	} `json:"message"`
 	Done            bool   `json:"done"`
 	DoneReason      string `json:"done_reason"`
@@ -63,6 +65,7 @@ type chatResponse struct {
 // Result is one completed generation.
 type Result struct {
 	Content    string
+	Thinking   string // the reasoning trace a thinking model produced, if any
 	PromptN    int
 	PredictedN int
 	PerSecond  float64
@@ -79,7 +82,15 @@ func (r Result) Truncated() bool { return r.DoneReason == "length" }
 // format carries the JSON Schema that constrains the output. Ollama forwards it
 // to llama.cpp as json_schema, so the reply is grammar-constrained rather than
 // merely requested politely.
-func (c *Client) Chat(msgs []Message, opts map[string]any, format json.RawMessage, keepAlive int) (*Result, error) {
+//
+// think is sent explicitly, never left to omitempty by accident, for the same
+// reason num_ctx is always explicit: a default this call did not pin can change
+// under it. For a reasoning model this matters more than most settings, because
+// thinking and content tokens draw from the same output budget (no separate
+// accounting) — a silent default can silently change what that budget is spent
+// on. nil means "let the model/template default decide," used only by Warmup
+// and Unload, which do not care what they get back.
+func (c *Client) Chat(msgs []Message, opts map[string]any, format json.RawMessage, keepAlive int, think *bool) (*Result, error) {
 	body, err := json.Marshal(chatRequest{
 		Model:     c.model,
 		Messages:  msgs,
@@ -87,6 +98,7 @@ func (c *Client) Chat(msgs []Message, opts map[string]any, format json.RawMessag
 		KeepAlive: keepAlive,
 		Format:    format,
 		Options:   opts,
+		Think:     think,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encoding chat request: %w", err)
@@ -117,6 +129,7 @@ func (c *Client) Chat(msgs []Message, opts map[string]any, format json.RawMessag
 
 	res := &Result{
 		Content:    out.Message.Content,
+		Thinking:   out.Message.Thinking,
 		PromptN:    out.PromptEvalCount,
 		PredictedN: out.EvalCount,
 		DoneReason: out.DoneReason,
@@ -197,13 +210,13 @@ func (c *Client) Running() (Placement, error) {
 func (c *Client) Warmup(opts map[string]any, keepAlive int) error {
 	_, err := c.Chat(
 		[]Message{{Role: "user", Content: "ok"}},
-		opts, nil, keepAlive)
+		opts, nil, keepAlive, nil)
 	return err
 }
 
 // Unload releases the model immediately.
 func (c *Client) Unload() error {
-	_, err := c.Chat([]Message{{Role: "user", Content: "ok"}}, nil, nil, 0)
+	_, err := c.Chat([]Message{{Role: "user", Content: "ok"}}, nil, nil, 0, nil)
 	return err
 }
 

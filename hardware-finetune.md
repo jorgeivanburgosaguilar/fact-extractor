@@ -189,6 +189,63 @@ them itself from `settings.json`'s `service.env` block, so `settings.json` owns 
 tuning story. When Ollama is already running, it is **adopted, never restarted** — its
 environment is unknown, and the CLI can only warn.
 
+### 1.8 Gemma 4 E2B QAT — the reasoning-model comparison
+
+Reachable with `--model fact-extractor-gemma4 --think` (`README.md` has the resulting
+scoreboard). Measured **2026-09-09**, same machine as §1.1, **Ollama 0.33.3** rather than
+the 0.32.15 this file was otherwise validated against (§4) — noted because item 7 of §3
+predicted this experiment before it was run; these are the numbers that landed.
+
+```
+$ nvidia-smi --query-gpu=memory.used,memory.total --format=csv
+2161 MiB, 6144 MiB
+```
+Measured with the model warm (`keep_alive: 30`) at `num_ctx 16384`, desktop included — the
+same methodology as §1.5, on a card otherwise idle. Against Qwen's 5587 MiB at the same
+context (§1.5), Gemma leaves roughly **3.4 GB more headroom** — expected, since its file is
+3.35 GB against Qwen's 4.68 GB, and `ollama ps` reports the whole loaded model at
+1,551,850,535 bytes resident on GPU (`size == size_vram`, 100% GPU, confirmed independently
+by `--benchmark`'s `checkPlacement` preflight on every run in the scoreboard).
+
+**The GGUF itself:** `general.architecture = gemma4`, `general.size_label = 4.6B`,
+`gemma4.context_length = 131072` — far above `num_ctx 16384` (§2.2), so no risk of the silent
+degradation §1.3 warns a model trained below the configured context would show. A sibling
+`mmproj-gemma-4-E2B-it-QAT-BF16.gguf` ships alongside the text weights; it is the vision
+projector and is **not used** — the Modelfile (`FROM` only, §2's rule) never references it.
+
+**Thinking, measured directly, before any benchmark ran.** A probe sent the real
+`system-instruction.md`, the real `schemas/facts.json` as `format`, and `corpus/01-news.md`
+to the live model three ways — `think` omitted, `true`, `false` — reading `message.thinking`
+and `message.content` back separately on each:
+
+| `think` sent | `eval_count` | thinking trace | facts extracted | leaked into `content`? |
+|---|---:|---:|---:|---|
+| omitted | 3442 | 6352 chars | 26 | no |
+| `true` | 3442 (identical — greedy, seeded) | 6352 chars | 26 | no |
+| `false` | 1452 | 0 | 19 | no |
+
+Three things this settles: **the model's own default is thinking-on** — omitting `think`
+behaves identically to `true`, because decoding is greedy with a fixed seed (§2.4) — so
+`--think` exists to make that pinned and explicit rather than to change the default, the
+same reasoning §2.2 gives for always sending `num_ctx`. **Ollama's `gemma4` builtin parser
+splits the reasoning channel cleanly**: `message.content` was valid, schema-conforming JSON
+in all three variants, never once carrying the `<|think|>` / `<|channel>` markers the raw
+chat template (embedded in the GGUF) uses to delimit thinking — confirmed again, per-chunk,
+across the full five-case benchmark. **Thinking measurably changes recall, not just token
+spend**, on this one document: 26 raw facts with thinking against 19 without, before dedup or
+verification.
+
+**The measured cost predicted in §3 item 7.** `eval_count` (generation tokens, thinking and
+content combined — there is no separate accounting) went from 1452 to 3442 for the same
+chunk: thinking on costs **~2.4×** the generation tokens here. Across the full benchmark,
+thinking traces ran 4502–20556 characters per case (`05-survey`'s three-chunk case spent the
+most, 20556, consistent with it being the longest document). Generation throughput measured
+**~58 tok/s** with thinking on and the model fully GPU-resident (3695 generated tokens at
+58.4 tok/s, then 171 at 58.3 tok/s, single-document run) — faster than Qwen's 25–32 tok/s
+per-token rate, as expected for a much smaller model, but the token *volume* thinking adds
+works against that rate: the five-case benchmark with thinking on took 581.3 s wall time,
+against a comparable Qwen benchmark run typically finishing in well under half that.
+
 ---
 
 ## 2. The parameters we set, and why
@@ -497,11 +554,15 @@ possible now. Read against the parameter it counters in §2.
    sizing, removing the conservative slack §2.6 currently spends on estimate error → Ollama
    exposes tokenization only on the llama-server subprocess it manages internally, not
    through its own API.
-7. **No reasoning budget** (§2.8) → a model that can think before answering → it could plan
-   a sentence-by-sentence sweep and check its own coverage before emitting the closing `]`,
-   attacking cause 3 of §2.6 (the grammar permits stopping) directly — something no sampling
-   parameter can do → thinking tokens would compete for the same output headroom §2.2
-   fights for, and cost generation time on a card already limited to 25–32 tok/s.
+7. **No reasoning budget** (§2.8) → a model that can think before answering → **tried, not
+   just predicted — §1.8 has the measurement.** Gemma 4 E2B with `--think` closes
+   `02-research` (14/18 → 18/18) and narrows both remaining capability probes without
+   closing them; the mechanism looks like the coverage sweep this row predicted, most
+   visible on `02-research`'s qualifiers and appositives coming out as separate facts →
+   the predicted cost landed too: thinking tokens compete for the same output headroom §2.2
+   fights for (confirmed — no separate accounting, ~2.4× the generation tokens for one
+   chunk), though on a smaller, faster model (~58 tok/s vs. 25–32) the wall-clock cost is
+   less severe than this row originally worried, even after that overhead.
 8. **Greedy decoding is the only stability mechanism available** (§2.4) → with headroom to
    spare, self-consistency — sample several times, keep the facts that appear in a
    majority — would convert the 17-vs-18 variance in §2.4 from noise into an actual
