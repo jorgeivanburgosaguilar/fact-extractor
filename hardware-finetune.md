@@ -228,8 +228,11 @@ and `message.content` back separately on each:
 
 Three things this settles: **the model's own default is thinking-on** — omitting `think`
 behaves identically to `true`, because decoding is greedy with a fixed seed (§2.4) — so
-`main.go` pins `think: true` explicitly by default (only `--no-think` turns it off) rather
-than leaving it to that default, the same reasoning §2.2 gives for always sending `num_ctx`.
+`main.go` pins `settings.json`'s `ollama.think` explicitly by default (only `--no-think`
+turns it off) rather than leaving it to that default, the same reasoning §2.2 gives for always
+sending `num_ctx`. `ollama.think` ships as `"max"`, not plain `true` — measured identical to
+`true` on this model (§3 item 7 has the level-by-level probe), a forward-looking default kept
+in case a future thinking-capable model actually varies its behaviour by level.
 **Ollama's `gemma4` builtin parser
 splits the reasoning channel cleanly**: `message.content` was valid, schema-conforming JSON
 in all three variants, never once carrying the `<|think|>` / `<|channel>` markers the raw
@@ -509,7 +512,27 @@ Before any request is sent, the CLI checks the fit and refuses rather than risk 
 overflow: `system tokens + largest chunk + largest chunk / 2 + 512 <= num_ctx`, and suggests
 halving `chunk_tokens` if it fails. This is the only context-related guard in the CLI —
 there is no separate warning tied to any fixed context threshold, and no `--ctx` flag; the
-only flag is `--benchmark`. Context comes solely from `settings.json`.
+only flag is `--benchmark`. Context comes solely from `settings.json`. When `settings.json`'s
+`passes` is greater than 1 (below), the formula grows by `(passes - 1) * (largest chunk +
+glean turn tokens)`: each extra pass carries the whole prior thread — the model's reply, which
+can be as long as its source, plus a new glean-turn user message — on top of everything before
+it, and that growth has to be budgeted the same way the base reply is.
+
+**`passes` — a second recall dial, same shape as `chunk_tokens`, tried and measured net
+negative here.** `passes: 1` (the default) is today's single-request-per-chunk pipeline.
+`passes > 1` follows each chunk's first reply with a glean turn per extra pass — appended to
+the same message thread, so the cached system-instruction prefix is untouched — asking the
+model to find what it missed rather than repeating an identical request under greedy decoding
+(which would return the identical list). The idea directly targets the failure this section
+opened with: a model that stops early on non-narrative text. **Measured on the current default
+model, `passes: 2` against the full corpus matched the exact same 85/97 gold facts as
+`passes: 1`, case for case, at 46% more wall-clock time (584.8 s against 399.0 s, and roughly
+double the generated tokens on some chunks)** — the glean turn restated its own list rather
+than surfacing anything the first pass missed; `facts.Merge`'s dedup absorbed the repeats with
+no fabricated citations introduced. `passes: 1` stays the shipped default on this evidence.
+The knob is not removed: a different model (one whose failure mode is losing attention rather
+than genuinely lacking the capability) or a different corpus may behave differently, and
+re-measuring costs one `--benchmark` run, not a code change.
 
 ### 2.7 Settings we deliberately do not use
 
@@ -634,12 +657,34 @@ possible now. Read against the parameter it counters in §2.
    less severe than this row originally worried, even after that overhead. §1.9 pushes this
    further on the same architecture, no extra tuning: the non-QAT release of the same model
    closes `05-survey` further still (13/23 → 16/23 → 18/23) while running faster, not slower
-   (~69 tok/s), than the QAT build this row measured.
+   (~69 tok/s), than the QAT build this row measured. **A finer-grained thinking budget was
+   also tried, not just available in principle, and came back inert rather than useful:**
+   Ollama's `think` field accepts `"low" | "medium" | "high" | "max"` in addition to a
+   boolean, and Gemma 4 E2B's capabilities list `thinking`, so five identical requests against
+   `01-news` were sent, one per value plus plain `true`. All five returned byte-identical
+   `eval_count` (2454), thinking-trace length (3752 characters) and content — no `400`, but no
+   effect either — while a `think: false` control on the same request measured 1441 tokens and
+   no trace, confirming the probe itself was sensitive to a real difference. This
+   architecture's Ollama template does not read the level string; it behaves exactly like
+   `true`. The client's `Think` field was still widened from `*bool` to a bool-or-string type
+   (`internal/ollama.Client.Chat`) and `ollama.think` in `settings.json` now ships as `"max"` —
+   a deliberate bet that costs nothing on a model that ignores it and pays off automatically on
+   a future model whose Ollama template actually varies by level, without a settings.json edit
+   when that model arrives. `SupportsThinking` still gates it exactly as before: a model with
+   no thinking capability at all never sees the field.
 8. **Greedy decoding is the only stability mechanism available** (§2.4) → with headroom to
    spare, self-consistency — sample several times, keep the facts that appear in a
    majority — would convert the 17-vs-18 variance in §2.4 from noise into an actual
    confidence signal → costs *n* times the generation time, which this card cannot absorb
-   today.
+   today. **A cheaper relative was tried instead: a conditioned second pass, not a repeated
+   one.** Greedy decoding makes an unconditioned repeat pointless — two identical requests
+   return the identical list — so self-consistency's *n*-times cost was never on the table
+   here. §2.6's `passes` setting tries the conditioned version instead: re-read the same chunk
+   with the model's own prior reply in the thread and ask only for what was missed. Measured
+   at `passes: 2` against the full corpus, it matched the identical 85/97 gold facts as
+   `passes: 1` at 46% more wall-clock time — a real attempt at the "stopped early" failure that
+   did not pay off on this model, distinct from self-consistency's cost, which was never
+   affordable enough here to test at all.
 
 §2.9 gives per-VRAM-tier guidance for *running this project elsewhere* (8–12 GB → 32768
 context, 16 GB+ → a larger model, no GPU → `num_gpu 0`). This section is the complementary

@@ -466,6 +466,14 @@ guidance for hardware other than the tested 6 GB card, and the service environme
 the VRAM budget depends on, are in
 [`hardware-finetune.md`](hardware-finetune.md) §2.9 and §2.3.
 
+`settings.json`'s `passes` (default `1`) adds a conditioned second pass per chunk — the model
+re-reads the chunk with its own prior reply in hand and is asked only for what it missed,
+rather than repeating an identical request under greedy decoding. It costs real time (roughly
++46% on this corpus, measured) and, on the current default model, found nothing the first pass
+had not already found — see [Where this goes next](#where-this-goes-next). The knob stays
+because a different model may behave differently; `1` is the default because that is what was
+actually measured to work best here.
+
 ## The corpus
 
 Each case in `corpus/` pairs a source document with the facts I extracted from it by hand,
@@ -504,7 +512,7 @@ avoid facts about an *absence* — they have no span to cite, so they cannot be 
 |---|---|
 | `ollama ps` shows less than 100% GPU | Partial CPU offload — roughly half speed, no error raised. Check the three env vars in `hardware-finetune.md` §2.3, or lower `num_ctx`. |
 | `has no model named "fact-extractor"` | The model was never created, or was created in a different store. Re-run `build.ps1`; check `OLLAMA_MODELS`. |
-| `input does not fit` | The refusal is deliberate and happens before any request. Lower `chunk_tokens` to the value the message suggests. |
+| `input does not fit` | The refusal is deliberate and happens before any request. Lower `chunk_tokens` to the value the message suggests, or lower `passes` if it's greater than 1 — each extra pass costs another full chunk's worth of context. |
 | Output cut off, `result.raw.txt` written | Generation hit the token cap. Lower `chunk_tokens`. |
 | Extraction runs for many minutes | Some models never emit a stop token. There is no `num_predict` cap in `settings.json` — add one if you are experimenting with unfamiliar models. |
 | `--benchmark` prints a `WARNING: the model is only ...` placement notice | The preflight check found less than 100% GPU residency; the run that follows isn't comparable to the recorded numbers. Same fix as the first row. |
@@ -579,6 +587,27 @@ against ~58), not at a speed cost. That is weights, not scale or thinking budget
 work; see [The QAT vs. non-QAT result](#the-qat-vs-non-qat-result) above. It does not answer
 whether a *larger* reasoning model would close the probes rather than narrow them, but it is
 evidence that this particular gap is not purely a parameter-count story either.
+
+**Two more attempts at the same "stopped early" failure were tried and measured, and both came
+back negative on this model.** First: Ollama's `think` field accepts `"low" | "medium" |
+"high" | "max"` in addition to a boolean, and Gemma 4 E2B reports `thinking` as a capability,
+so a direct probe sent five otherwise-identical requests against `01-news`, one per value. All
+five — including plain `true` — came back byte-identical: 2454 generated tokens, a
+3752-character thinking trace, the same content, no `400` rejecting any of them. A
+`think: false` control on the same request measured 1441 tokens and no trace at all, so the
+probe was capable of detecting a real difference — it just found none among the five "on"
+values. This architecture's Ollama template does not act on the level string; it is a no-op
+here, not an effort dial. `ollama.think` ships as `"max"` anyway — it costs nothing on a model
+that ignores it, and the next thinking-capable model this project tries gets the level for
+free if its template actually reads it. Second: a conditioned second pass, added as `passes` in
+`settings.json`. Repeating an identical request buys nothing under greedy decoding, so
+`passes > 1` instead appends the model's own prior reply to the message thread and asks only
+for what it missed, once per extra pass. Run against the full corpus, `passes: 2` matched the
+exact same 85/97 gold facts as `passes: 1` — case for case, not just in total — at 46% more
+wall-clock time (584.8 s against 391.8 s). The glean turn restated its own list rather than
+finding anything new. Both knobs stay in the code (`hardware-finetune.md` §2.6 and §3 items 7
+and 8 have the full measurements): a different model or a harder corpus may behave
+differently, and re-checking either costs one `--benchmark` run.
 
 A second direction remains untried:
 

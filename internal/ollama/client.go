@@ -46,7 +46,12 @@ type chatRequest struct {
 	KeepAlive int             `json:"keep_alive"`
 	Format    json.RawMessage `json:"format,omitempty"`
 	Options   map[string]any  `json:"options,omitempty"`
-	Think     *bool           `json:"think,omitempty"`
+	// Think is a bool or an effort-level string ("low"|"medium"|"high"|"max")
+	// for a model that supports one - Ollama accepts either shape. omitempty
+	// checks whether the interface itself is nil, not the zero value it might
+	// hold, so an explicit false (never think) is still sent; only a caller
+	// that passes nil omits the field entirely.
+	Think any `json:"think,omitempty"`
 }
 
 type chatResponse struct {
@@ -88,13 +93,20 @@ func (r Result) Truncated() bool { return r.DoneReason == "length" }
 // default this call did not pin can change under it. For a reasoning model
 // this matters more than most settings, because thinking and content tokens
 // draw from the same output budget (no separate accounting) — a silent
-// default can silently change what that budget is spent on. main.go pins this
-// true unless --no-think says otherwise, but only after SupportsThinking
-// confirms the model has a thinking mode: Ollama returns 400 Bad Request for
-// think on a model that does not, rather than ignoring it. Callers pass nil
-// either because the model cannot think or to mean "let the model/template
-// default decide," which is all Warmup and Unload want.
-func (c *Client) Chat(msgs []Message, opts map[string]any, format json.RawMessage, keepAlive int, think *bool) (*Result, error) {
+// default can silently change what that budget is spent on. It is a bool or
+// an effort-level string ("low"|"medium"|"high"|"max") — Ollama accepts
+// either for a model that supports it, though which levels (if any) actually
+// change behaviour is architecture-specific and not reported anywhere in
+// /api/show; hardware-finetune.md §3 item 7 found every level identical to
+// true on Gemma 4. main.go pins this to settings.json's ollama.think unless
+// --no-think says otherwise, but only after SupportsThinking confirms the
+// model has a thinking mode: Ollama returns 400 Bad Request for a think
+// value the model does not accept — whether because it cannot think at all
+// or because that specific level is not one of its valid values (documented
+// for gpt-oss, which accepts only low|medium|high) — rather than ignoring
+// it. Callers pass nil either because the model cannot think or to mean "let
+// the model/template default decide," which is all Warmup and Unload want.
+func (c *Client) Chat(msgs []Message, opts map[string]any, format json.RawMessage, keepAlive int, think any) (*Result, error) {
 	body, err := json.Marshal(chatRequest{
 		Model:     c.model,
 		Messages:  msgs,

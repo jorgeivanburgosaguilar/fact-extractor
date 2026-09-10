@@ -20,6 +20,17 @@ type Ollama struct {
 	Host      string `json:"host"`
 	Model     string `json:"model"`
 	KeepAlive int    `json:"keep_alive"`
+
+	// Think is sent as the request's think field for a model that reports the
+	// "thinking" capability (main.go checks that first; a model with no
+	// thinking mode never sees this value at all). It must decode to a bool
+	// or one of the four effort-level strings Ollama documents -
+	// "low"|"medium"|"high"|"max" - and is forwarded to Ollama exactly as
+	// given, never interpreted here. Which levels (if any) actually change a
+	// given model's behaviour is architecture-specific; hardware-finetune.md
+	// §3 item 7 found every level identical to plain true on Gemma 4, so
+	// "max" is a forward-looking default rather than a measured gain there.
+	Think any `json:"think"`
 }
 
 // Options is the block sent to Ollama with every request. It is an open map so
@@ -54,6 +65,7 @@ type Settings struct {
 	Service     Service `json:"service"`
 	SourceModel string  `json:"source_model"`
 	ChunkTokens int     `json:"chunk_tokens"`
+	Passes      int     `json:"passes"`
 	Options     Options `json:"options"`
 
 	baseDir string
@@ -120,9 +132,17 @@ func (s *Settings) validate(path string) error {
 	if s.Ollama.Model == "" {
 		return missing("ollama.model")
 	}
+	if !validThink(s.Ollama.Think) {
+		return fmt.Errorf("%s: \"ollama.think\" must be true, false, or one of "+
+			"\"low\", \"medium\", \"high\", \"max\", got %#v", path, s.Ollama.Think)
+	}
 	if s.ChunkTokens <= 0 {
 		return fmt.Errorf("%s: \"chunk_tokens\" must be a positive number, got %d",
 			path, s.ChunkTokens)
+	}
+	if s.Passes <= 0 {
+		return fmt.Errorf("%s: \"passes\" must be a positive number, got %d",
+			path, s.Passes)
 	}
 	if len(s.Options) == 0 {
 		return missing("options")
@@ -141,4 +161,23 @@ func (s *Settings) validate(path string) error {
 			"context after an out-of-memory retry without saying so.", path)
 	}
 	return nil
+}
+
+// validThink reports whether v is a value main.go may hand Ollama's think
+// field: a bool, or one of the four effort-level strings Ollama documents.
+// It does not know whether any given model accepts a particular level -
+// that is architecture-specific and Ollama's own 400 is what surfaces it -
+// this only catches a typo or a JSON type mismatch in settings.json itself
+// before a request is ever sent.
+func validThink(v any) bool {
+	switch t := v.(type) {
+	case bool:
+		return true
+	case string:
+		switch t {
+		case "low", "medium", "high", "max":
+			return true
+		}
+	}
+	return false
 }

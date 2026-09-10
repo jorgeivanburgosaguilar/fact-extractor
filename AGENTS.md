@@ -132,7 +132,10 @@ no merging, no compiled-in fallback chain — one flat file describing one job.
 
 ```json
 {
-  "ollama": { "host": "http://127.0.0.1:11434", "model": "fact-extractor", "keep_alive": 0 },
+  "ollama": {
+    "host": "http://127.0.0.1:11434", "model": "fact-extractor",
+    "keep_alive": 0, "think": "max"
+  },
   "service": {
     "manage": true,
     "command": "ollama",
@@ -146,6 +149,7 @@ no merging, no compiled-in fallback chain — one flat file describing one job.
   },
   "source_model": "models/gemma-4-E2B-it-QAT-Q4_0.gguf",
   "chunk_tokens": 1000,
+  "passes": 1,
   "options": {
     "num_ctx": 16384, "num_gpu": 99, "num_batch": 512,
     "temperature": 0.0, "top_k": 1, "top_p": 1.0,
@@ -170,15 +174,17 @@ override, which is two sources of truth for one value.
 asks `/api/show` whether `cfg.Ollama.Model`'s capabilities include `thinking` — Ollama
 returns `400 Bad Request` for `think` on a model that does not have that capability, rather
 than ignoring it, so this checks first instead of assuming. Only when it does is `think` sent
-explicitly — pinned `true` by default, `false` only when `--no-think` is passed — because a
-reasoning model's own template already defaults to thinking-on (`hardware-finetune.md` §1.8),
-so an unset field never actually turned it off. A model with no thinking mode never sees the
-field at all, so `--no-think` is simply a no-op for it. Neither flag writes `settings.json`, neither adds a
-second block of settings, and neither is read back from disk — the boundary that keeps this
-from being the profile system §8 rules out. `build.ps1`'s `$models` list can create more
-than one Ollama model (the default `settings.json` names, plus any reachable only through
-`--model`), but `settings.json`'s shape does not change: `source_model` still records
-provenance for the default model alone.
+explicitly — pinned to `settings.json`'s `ollama.think` by default (a bool or one of
+`"low"|"medium"|"high"|"max"`; ships as `"max"`), `false` only when `--no-think` is passed —
+because a reasoning model's own template already defaults to thinking-on
+(`hardware-finetune.md` §1.8), so an unset field never actually turned it off. A model with no
+thinking mode never sees the field at all, so `--no-think` is simply a no-op for it. Neither
+flag writes `settings.json`, neither adds a second block of settings, and neither is read back
+from disk — the boundary that keeps this from being the profile system §8 rules out.
+`build.ps1`'s `$models` list can create more than one Ollama model (the default
+`settings.json` names, plus any reachable only through `--model`), but `settings.json`'s shape
+does not change: `source_model` still records provenance for the default model alone, and
+`ollama.think` is one value shared by whichever model a run actually names.
 
 **`$models[0]` is always the current benchmark winner.** Whichever model matches more gold
 facts *in total* across the whole corpus (§5's scoreboard) is the one `settings.json` names
@@ -193,6 +199,24 @@ uses. As of §6, **Gemma 4 E2B (non-QAT)** backs the default `fact-extractor` na
 E2B QAT** and **Qwen2.5-7B-Instruct-1M** are both historical baselines now, reachable with
 `--model fact-extractor-gemma4-qat` and `--model fact-extractor-qwen` respectively.
 
+**`passes` is a third global scalar, the same shape as `chunk_tokens`.** `passes: 1`
+(the default) is today's pipeline, byte-for-byte. `passes > 1` follows each chunk's first
+reply with one glean turn per extra pass, on the same message thread — `[chunk][pass 1
+reply][glean turn][pass 2 reply]...` — so the model is asked to find what it missed rather
+than repeat an identical request under greedy decoding, which would return the identical
+list. The glean turn's wording is a **Go constant in `main.go` (`gleanInstruction`),
+deliberately not folded into `system-instruction.md`**: that file must stay byte-identical on
+every request to remain the cached prompt prefix (see Correctness, below), and the glean turn
+only exists on the multi-pass path most runs never take. Each pass is verified against the
+chunk and merged the same way chunks are (`facts.Merge`, deduping on the normalised
+sentence), so a fact the model restates despite being told not to costs nothing. **Measured,
+not just designed:** a `passes: 2` benchmark run against the current default model matched
+the exact same 85/97 gold facts as `passes: 1`, on every one of the five cases, at 46% more
+wall-clock time (584.8 s against 399.0 s) — the glean turn restated its own list rather than
+finding anything new. `passes: 1` remains the shipped default on this evidence; the knob
+stays because a different model or corpus may find the glean turn useful where this one did
+not.
+
 ### Execution flow
 
 ```
@@ -203,10 +227,14 @@ E2B QAT** and **Qwen2.5-7B-Instruct-1M** are both historical baselines now, reac
    Ctrl-C handler. Fail with an actionable message if neither is possible.
 4. Check the model exists. Fail naming the model and how to create it.
 5. Split the input into chunks of settings.chunk_tokens (character estimate — Ollama
-   exposes no tokenizer). Refuse up front if system + largest chunk + headroom > num_ctx.
-6. For each chunk: POST /api/chat { messages, format, options, keep_alive: 0 }.
-   Parse the reply, then verify every verbatim span against that chunk.
-7. Merge the per-chunk documents, drop duplicates, renumber ids.
+   exposes no tokenizer). Refuse up front if system + largest chunk + headroom
+   (scaled by settings.passes, see hardware-finetune.md section 2.6) > num_ctx.
+6. For each chunk, for each of settings.passes: POST /api/chat { messages, format, options,
+   keep_alive: 0 }. Pass 1 sends [system, chunk]; each pass after it appends the prior
+   assistant reply and a glean-turn user message, then parses the new reply and verifies
+   every verbatim span against that chunk.
+7. Merge the per-chunk documents (across passes, then across chunks), drop duplicates,
+   renumber ids.
 8. Split the merged facts into cited and inferred, and locate every citation in the whole
    source (`internal/output`). This is presentation, after inference: it adds no claim and
    changes no fact.
@@ -352,6 +380,14 @@ Each corpus entry pairs a source text with gold facts anchored to source spans:
 - **Inferred facts (`verbatim: null`) are never graded** — they have no span to match.
 - **Preflight:** confirm `ollama ps` reports full GPU placement. Benchmarking a
   CPU-offloaded model measures the wrong thing.
+- **Every `--benchmark` run also writes `benchmark.json`** next to `result.json`
+  (`internal/benchmark.Run`, encoded by `internal/benchmark.Encode`): the model, `think` value,
+  `passes`, `chunk_tokens`, `num_ctx`, and every number `report()` prints to stderr, per case
+  and totalled. This is the same reporting-only rule as everything else in this section — it
+  does not feed `Score`, `Pass` or `Threshold`, and a write failure only logs a warning rather
+  than failing the run. It exists so a matrix of models × `think` × `passes` can be compared
+  without transcribing terminal output by hand, which is how every number in `README.md`'s
+  scoreboard was produced before it existed.
 
 ### The claims-about-code case
 
@@ -437,6 +473,26 @@ is fine-tuned for quantization robustness, not just a different quant scheme of 
 checkpoint). It won on every axis measured — higher score, faster generation, shorter
 thinking traces — which is why it, not QAT, backs the default name today.
 
+**Two more levers were tried against the same "stopped early" failure shape, and both came
+back negative on this model and corpus — but one is kept as the shipped default anyway.**
+Ollama's `think` field accepts `"low" | "medium" | "high" | "max"` as well as a boolean, and
+Gemma 4 E2B's own capabilities list `thinking`, so a direct probe sent five identical requests
+against `01-news`, one per value. All five — including plain `true` — returned byte-identical
+`eval_count` (2454), thinking length (3752 characters) and content, while `think: false` on
+the same request measured 1441 tokens and no thinking trace at all. The model accepts a level
+string without a `400`, but this architecture's Ollama template does not act on it: it is a
+no-op, not a dial, on this model. **`ollama.think` ships as `"max"` regardless** — a
+deliberate bet, not an oversight: it costs nothing on a model that ignores it, and pays off
+automatically on a future thinking-capable model whose template actually varies by level,
+without a settings.json edit when that model arrives. `internal/ollama.Client.Chat`'s `Think`
+field was widened from `*bool` to a bool-or-string type to carry it; `SupportsThinking` still
+gates the whole thing exactly as before, so a model with no thinking capability at all never
+sees the field. Second, the `passes` scalar described under Configuration above: a `passes: 2`
+benchmark run matched the exact same 85/97 gold facts, case for case, as `passes: 1`, at 46%
+more wall-clock time — the glean turn restated its own list rather than surfacing anything
+new. `passes: 1` stays the default here on that evidence; both `passes` and the wider `think`
+type stay available in the code for a model or corpus where either might behave differently.
+
 A second direction remains untried:
 
 - **A model trained on claim-plus-evidence-span data**, not merely fine-tuned for chat.
@@ -466,7 +522,8 @@ comes next would make every number in §5 meaningless.
   drifts.
 - **I/O files:** `system-instruction.md` (prompt), `prompt.md` (input), `result.json`
   (output, shaped by `internal/output` — see §1), `result.raw.txt` (rescued output on
-  failure), `settings.json` (configuration). Do not rename these.
+  failure), `settings.json` (configuration), `benchmark.json` (per-`--benchmark`-run report,
+  written by `internal/benchmark.Encode` — see §5). Do not rename these.
 - The schema and the system instruction are `go:embed`-ed as fallbacks; a file beside the
   exe wins.
 - **`settings.json` is generated by the build, never by the binary.**
@@ -498,6 +555,13 @@ comes next would make every number in §5 meaningless.
 - Reintroduce profiles (a `models` block, an alias map, per-model `options`) or a non-JSON
   output mode. `--model` names an Ollama model directly; it is not a profile system, and
   `settings.json`'s shape does not change to support it — see §2's Configuration section.
+- Make `think` or `passes` vary per model, or move either into a `models` block. Both are
+  global scalars in `settings.json`, the same shape as `chunk_tokens` — a recall dial the
+  build owns, not a per-model setting; that would be the profile system this file already
+  rules out, just spelled a different way.
+- Fold the glean-turn wording (`gleanInstruction` in `main.go`) into `system-instruction.md`.
+  That file must stay byte-identical on every request to remain the cached prompt prefix (§4);
+  the glean turn only exists on the `passes > 1` path most runs never take.
 - Assert an exact fact count in a test.
 - Commit `.gguf` files or binaries to git.
 

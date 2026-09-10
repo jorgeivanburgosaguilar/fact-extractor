@@ -184,6 +184,11 @@ $settings = [ordered]@{
         host       = 'http://127.0.0.1:11434'
         model      = $modelName
         keep_alive = 0          # unload as soon as the run ends; hold no VRAM
+        think      = 'max'      # bool or "low"|"medium"|"high"|"max"; only sent to a model
+                                 # that reports the "thinking" capability. Forward-looking:
+                                 # measured as a no-op on Gemma 4 (hardware-finetune.md
+                                 # section 3 item 7) but costs nothing to ask for, and the
+                                 # next thinking model this project tries gets it for free.
     }
     service = [ordered]@{
         manage                  = $true
@@ -193,6 +198,7 @@ $settings = [ordered]@{
     }
     source_model = $gguf        # provenance, not a runtime path
     chunk_tokens = 1000
+    passes       = 1            # >1 adds a conditioned second pass per chunk; see AGENTS.md section 2
     options      = [ordered]@{
         num_ctx        = 16384  # always explicit: Ollama silently shrinks an automatic context
         num_gpu        = 99

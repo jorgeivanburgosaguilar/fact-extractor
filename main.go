@@ -4,10 +4,11 @@
 // It does one job. Context and sampling come from settings.json; the input and
 // output filenames are fixed. The flags are --benchmark, --model (override
 // which Ollama model is used for this run) and --no-think (disable thinking
-// for a reasoning model; thinking is on by default for one, and the flag has
-// no effect on a model with no thinking mode - checked against Ollama's
-// reported capabilities before think is ever sent, since Ollama rejects that
-// field outright for a model that does not support it).
+// for a reasoning model; settings.json's ollama.think - a bool or an effort
+// level string - is sent otherwise, and the flag has no effect on a model
+// with no thinking mode - checked against Ollama's reported capabilities
+// before think is ever sent, since Ollama rejects that field outright for a
+// model that does not support it).
 //
 // The Ollama service is managed for the one-shot flow: a service already
 // running is adopted and left alone; otherwise one is started with the tuning
@@ -54,7 +55,28 @@ const (
 	promptFile      = "prompt.md"
 	outputFile      = "result.json"
 	corpusDir       = "corpus"
+	benchmarkFile   = "benchmark.json"
 )
+
+// gleanInstruction drives every request after the first when settings.json's
+// "passes" is greater than 1. It is a Go constant, deliberately not folded
+// into system-instruction.md: that file must stay byte-identical on every
+// request so it remains the cached prompt prefix (AGENTS.md section 4,
+// hardware-finetune.md section 2.5), and this turn only exists on the
+// multi-pass path - most runs (passes: 1) never send it.
+//
+// It targets the one documented failure shape directly: the model stops
+// early on non-narrative text and hands back a valid but incomplete list
+// (AGENTS.md section 6). Repeating the same request buys nothing under
+// greedy decoding - it would return the identical list - so this instead
+// conditions on the model's own prior reply, appended to the same message
+// thread so the chunk stays the cached prefix and only the new turns are
+// generated.
+const gleanInstruction = `Look again at the same source text. Your list above may be incomplete: ` +
+	`find any facts you have not already listed, following every rule from the system ` +
+	`instructions exactly as before, including the JSON schema and the verbatim requirement. ` +
+	`Do not repeat, restate or rephrase a fact you already gave. If you find nothing new, ` +
+	`respond with {"facts": []}.`
 
 func main() {
 	if err := run(); err != nil {
@@ -116,24 +138,34 @@ func run() error {
 		return err
 	}
 
-	// think is sent explicitly, pinned on unless --no-think says otherwise,
-	// but only for a model that actually has a thinking mode: Ollama returns
-	// 400 Bad Request for think on a model that does not, rather than
-	// ignoring it, so this checks first instead of assuming. A reasoning
-	// model's own template already defaults to thinking-on
-	// (hardware-finetune.md §1.8 measured this for Gemma 4: omitting think
-	// behaves identically to true), so leaving it unset never actually turned
-	// thinking off - only --no-think does that, by pinning the request's
-	// think field to false.
-	var thinkPtr *bool
+	// think is sent explicitly, pinned to settings.json's ollama.think unless
+	// --no-think says otherwise, but only for a model that actually has a
+	// thinking mode: Ollama returns 400 Bad Request for think on a model that
+	// does not, rather than ignoring it, so this checks first instead of
+	// assuming. ollama.think may be a boolean or an effort level string
+	// ("low"|"medium"|"high"|"max") - Ollama accepts either for a model that
+	// supports it. Gemma 4 measured every level as identical to true
+	// (hardware-finetune.md §3 item 7: this Ollama build's gemma4 template
+	// does not act on the string), so "max" here is a forward-looking
+	// default, not a measured gain on the current model - the next
+	// thinking-capable model this project tries gets the level for free
+	// without a settings.json edit. A model whose template treats an
+	// unsupported specific level as an error (documented for gpt-oss, which
+	// accepts only low|medium|high) surfaces that as the same named,
+	// actionable HTTP error this project already gives for a model with no
+	// thinking mode at all - see hint() in internal/ollama/client.go.
+	var think any
 	if canThink, err := client.SupportsThinking(); err != nil {
 		return fmt.Errorf("checking whether %s supports thinking: %w", cfg.Ollama.Model, err)
 	} else if canThink {
-		think := !*noThink
-		thinkPtr = &think
+		if *noThink {
+			think = false
+		} else {
+			think = cfg.Ollama.Think
+		}
 	}
 
-	ex := &extractor{cfg: cfg, client: client, system: system, schema: schema, think: thinkPtr}
+	ex := &extractor{cfg: cfg, client: client, system: system, schema: schema, think: think}
 
 	if *bench {
 		return runBenchmark(ex, cfg)
@@ -198,7 +230,7 @@ type extractor struct {
 	client *ollama.Client
 	system string
 	schema json.RawMessage
-	think  *bool // nil if the model has no thinking mode; else pinned true unless --no-think, see run()
+	think  any // nil if the model has no thinking mode; else a bool or effort-level string, see run()
 }
 
 // stats is what a run reports about itself.
@@ -208,6 +240,13 @@ type stats struct {
 	predictN   int
 	thinkChars int // length of the reasoning trace, summed across chunks
 	verified   facts.VerifyResult
+
+	// Passes beyond the first, summed separately so a report can show what a
+	// glean pass actually cost on top of the base extraction above.
+	extraRequests   int
+	extraPromptN    int
+	extraPredictN   int
+	extraThinkChars int
 }
 
 // extract runs the whole pipeline over one text: split, generate per chunk,
@@ -232,47 +271,84 @@ func (e *extractor) extract(text string, progress bool) (*facts.Document, stats,
 	// it stays the cached common prefix and chunks 2..N do not re-prefill it.
 	sys := ollama.Message{Role: "system", Content: e.system}
 
+	passes := e.cfg.Passes
+	if passes < 1 {
+		passes = 1
+	}
+
 	var docs []*facts.Document
 	for i, chunk := range chunks {
 		if progress && len(chunks) > 1 {
 			fmt.Fprintf(os.Stderr, "  chunk %d/%d ... ", i+1, len(chunks))
 		}
-		res, err := e.client.Chat(
-			[]ollama.Message{sys, {Role: "user", Content: chunk}},
-			e.cfg.Options, e.schema, e.cfg.Ollama.KeepAlive, e.think)
-		if err != nil {
-			return nil, st, fmt.Errorf("chunk %d/%d: %w", i+1, len(chunks), err)
-		}
-		st.promptN += res.PromptN
-		st.predictN += res.PredictedN
-		st.thinkChars += len(res.Thinking)
 
-		if progress {
-			if len(chunks) > 1 {
-				fmt.Fprintf(os.Stderr, "%d tokens (%.1f tok/s)\n", res.PredictedN, res.PerSecond)
+		// msgs grows by one assistant/user pair per glean pass, so every pass
+		// after the first is conditioned on the model's own prior reply
+		// instead of repeating the identical request under greedy decoding.
+		msgs := []ollama.Message{sys, {Role: "user", Content: chunk}}
+		var chunkDocs []*facts.Document
+
+		for pass := 1; pass <= passes; pass++ {
+			label := fmt.Sprintf("chunk %d/%d", i+1, len(chunks))
+			if passes > 1 {
+				label = fmt.Sprintf("%s pass %d/%d", label, pass, passes)
+			}
+
+			res, err := e.client.Chat(msgs, e.cfg.Options, e.schema, e.cfg.Ollama.KeepAlive, e.think)
+			if err != nil {
+				return nil, st, fmt.Errorf("%s: %w", label, err)
+			}
+			if pass == 1 {
+				st.promptN += res.PromptN
+				st.predictN += res.PredictedN
+				st.thinkChars += len(res.Thinking)
 			} else {
-				fmt.Fprintf(os.Stderr, "generated %d tokens (%.1f tok/s)\n",
-					res.PredictedN, res.PerSecond)
+				st.extraRequests++
+				st.extraPromptN += res.PromptN
+				st.extraPredictN += res.PredictedN
+				st.extraThinkChars += len(res.Thinking)
+			}
+
+			if progress {
+				if passes > 1 {
+					fmt.Fprintf(os.Stderr, "%s: %d tokens (%.1f tok/s)\n", label, res.PredictedN, res.PerSecond)
+				} else if len(chunks) > 1 {
+					fmt.Fprintf(os.Stderr, "%d tokens (%.1f tok/s)\n", res.PredictedN, res.PerSecond)
+				} else {
+					fmt.Fprintf(os.Stderr, "generated %d tokens (%.1f tok/s)\n",
+						res.PredictedN, res.PerSecond)
+				}
+			}
+			if res.Truncated() {
+				return nil, st, e.truncated(res.Content, i, len(chunks))
+			}
+			if leak := thinkingLeak(res.Content); leak != "" {
+				return nil, st, e.leaked(res.Content, leak, i, len(chunks))
+			}
+
+			doc, err := facts.Parse(res.Content)
+			if err != nil {
+				return nil, st, e.rawFallback(res.Content, err)
+			}
+			// Check every citation against the text it came from, so verbatim
+			// is always either null or a real substring.
+			v := facts.Verify(doc, chunk)
+			st.verified.Exact += v.Exact
+			st.verified.Repaired += v.Repaired
+			st.verified.Dropped += v.Dropped
+			chunkDocs = append(chunkDocs, doc)
+
+			if pass < passes {
+				msgs = append(msgs,
+					ollama.Message{Role: "assistant", Content: res.Content},
+					ollama.Message{Role: "user", Content: gleanInstruction})
 			}
 		}
-		if res.Truncated() {
-			return nil, st, e.truncated(res.Content, i, len(chunks))
-		}
-		if leak := thinkingLeak(res.Content); leak != "" {
-			return nil, st, e.leaked(res.Content, leak, i, len(chunks))
-		}
 
-		doc, err := facts.Parse(res.Content)
-		if err != nil {
-			return nil, st, e.rawFallback(res.Content, err)
-		}
-		// Check every citation against the text it came from, so verbatim is
-		// always either null or a real substring.
-		v := facts.Verify(doc, chunk)
-		st.verified.Exact += v.Exact
-		st.verified.Repaired += v.Repaired
-		st.verified.Dropped += v.Dropped
-		docs = append(docs, doc)
+		// Dedup within the chunk before the outer merge, so a fact repeated
+		// across passes (the model restating something despite being told not
+		// to) counts once, the same as a fact repeated across chunks.
+		docs = append(docs, facts.Merge(chunkDocs))
 	}
 
 	return facts.Merge(docs), st, nil
@@ -283,6 +359,16 @@ func (e *extractor) extract(text string, progress bool) (*facts.Document, stats,
 //
 // Chunk sizes are estimated rather than tokenized: Ollama exposes no public
 // tokenizer, so the headroom below is deliberately generous.
+//
+// When settings.json's "passes" is greater than 1, every pass after the first
+// carries the growing message thread: the model's prior reply plus a new
+// glean turn, on top of everything before it (extract's msgs slice). A reply
+// can be as long as its source (the same assumption the single-pass headroom
+// below already makes), so each extra pass is costed as a full extra copy of
+// the largest chunk, not the smaller single-pass reply allowance. Without
+// this term a multi-pass run on a dense chunk overflows num_ctx only on its
+// second request, which would otherwise surface as truncation instead of the
+// deliberate refusal this check exists to give.
 func (e *extractor) checkFits(chunks []string) error {
 	sysN := textsplit.Estimate(e.system)
 	largest := 0
@@ -291,16 +377,25 @@ func (e *extractor) checkFits(chunks []string) error {
 			largest = n
 		}
 	}
+	passes := e.cfg.Passes
+	if passes < 1 {
+		passes = 1
+	}
+	glean := textsplit.Estimate(gleanInstruction)
+
 	// Leave room for the reply; a fact list can be as long as its source.
 	needed := sysN + largest + largest/2 + 512
+	if passes > 1 {
+		needed += (passes - 1) * (largest + glean)
+	}
 	ctx := e.cfg.NumCtx()
 	if needed <= ctx {
 		return nil
 	}
 	return fmt.Errorf(
-		"input does not fit: system %d + largest chunk %d tokens needs about %d, num_ctx is %d\n"+
-			"Lower \"chunk_tokens\" in settings.json to %d, or raise \"options.num_ctx\".",
-		sysN, largest, needed, ctx, e.cfg.ChunkTokens/2)
+		"input does not fit: system %d + largest chunk %d tokens over %d pass(es) needs about %d, num_ctx is %d\n"+
+			"Lower \"chunk_tokens\" in settings.json to %d, lower \"passes\", or raise \"options.num_ctx\".",
+		sysN, largest, passes, needed, ctx, e.cfg.ChunkTokens/2)
 }
 
 // runOnce is the normal path: prompt.md in, result.json out.
@@ -351,6 +446,15 @@ func runOnce(e *extractor, cfg *settings.Settings) error {
 		fmt.Fprintf(os.Stderr, "thinking: %d character(s) of reasoning trace, not counted in the facts above\n",
 			st.thinkChars)
 	}
+	if st.extraRequests > 0 {
+		fmt.Fprintf(os.Stderr,
+			"glean pass(es): %d extra request(s), %d prompt + %d generated tokens",
+			st.extraRequests, st.extraPromptN, st.extraPredictN)
+		if st.extraThinkChars > 0 {
+			fmt.Fprintf(os.Stderr, " (%d thinking character(s))", st.extraThinkChars)
+		}
+		fmt.Fprintln(os.Stderr)
+	}
 	return nil
 }
 
@@ -365,7 +469,7 @@ func runBenchmark(e *extractor, cfg *settings.Settings) error {
 	fmt.Fprintf(os.Stderr, "benchmarking %s against %d corpus case(s)\n",
 		cfg.Ollama.Model, len(cases))
 	if e.think != nil {
-		fmt.Fprintf(os.Stderr, "thinking: %v\n", *e.think)
+		fmt.Fprintf(os.Stderr, "thinking: %v\n", e.think)
 	} else {
 		fmt.Fprintln(os.Stderr, "thinking: not applicable (this model has no thinking mode)")
 	}
@@ -376,6 +480,7 @@ func runBenchmark(e *extractor, cfg *settings.Settings) error {
 
 	started := time.Now()
 	failed := 0
+	records := make([]benchmark.CaseRecord, 0, len(cases))
 
 	for _, c := range cases {
 		raw, err := os.ReadFile(c.Source)
@@ -385,13 +490,42 @@ func runBenchmark(e *extractor, cfg *settings.Settings) error {
 		text := string(raw)
 
 		fmt.Fprintf(os.Stderr, "%s\n", c.Name)
+		caseStarted := time.Now()
 		doc, st, err := e.extract(text, false)
 		if err != nil {
 			return fmt.Errorf("case %s: %w", c.Name, err)
 		}
+		caseElapsed := time.Since(caseStarted)
 
 		r := benchmark.Score(c.Name, doc, text, c.Gold)
 		report(r, st, len(c.Gold))
+
+		rec := benchmark.CaseRecord{
+			Name:         c.Name,
+			Pass:         r.Pass(),
+			Gold:         len(c.Gold),
+			Matched:      r.Matched,
+			Missed:       len(r.Missed),
+			Unanchored:   len(r.Unanchored),
+			Extracted:    r.Extracted,
+			TypeMismatch: r.TypeMismatch,
+			Inferred:     r.Inferred,
+			Fabricated:   r.Fabricated,
+			Verify: benchmark.VerifyCounts{
+				Exact:    st.verified.Exact,
+				Repaired: st.verified.Repaired,
+				Dropped:  st.verified.Dropped,
+			},
+			Chunks:          st.chunks,
+			PromptTokens:    st.promptN,
+			EvalTokens:      st.predictN,
+			ThinkChars:      st.thinkChars,
+			ElapsedMS:       caseElapsed.Milliseconds(),
+			ExtraRequests:   st.extraRequests,
+			ExtraPromptN:    st.extraPromptN,
+			ExtraPredictN:   st.extraPredictN,
+			ExtraThinkChars: st.extraThinkChars,
+		}
 
 		// The independent second opinion: the same contract check the standalone
 		// checkfacts tool makes, run on the merged document against the whole
@@ -399,23 +533,43 @@ func runBenchmark(e *extractor, cfg *settings.Settings) error {
 		if enc, err := output.Encode(output.Build(doc, text)); err == nil {
 			if v, err := validate.Check(enc, text); err != nil {
 				fmt.Fprintf(os.Stderr, "    validation error: %v\n", err)
+				rec.Validation = &benchmark.ValidationRecord{Error: err.Error()}
 			} else if !v.OK() {
 				fmt.Fprintf(os.Stderr, "    validation: %d contract violation(s):\n", len(v.Problems))
 				for _, p := range v.Problems {
 					fmt.Fprintf(os.Stderr, "      %s\n", p)
 				}
+				rec.Validation = &benchmark.ValidationRecord{
+					OK: false, Checked: v.Checked, Exact: v.Exact, Problems: v.Problems,
+				}
 			} else {
 				fmt.Fprintf(os.Stderr, "    validation: contract OK (%d/%d spans exact)\n", v.Exact, v.Checked)
+				rec.Validation = &benchmark.ValidationRecord{OK: true, Checked: v.Checked, Exact: v.Exact}
 			}
 		}
 
+		records = append(records, rec)
 		if !r.Pass() {
 			failed++
 		}
 	}
 
+	elapsed := time.Since(started)
 	fmt.Fprintf(os.Stderr, "\n%d/%d cases passed in %s\n",
 		len(cases)-failed, len(cases), took(started))
+
+	run := benchmark.NewRun(cfg.Ollama.Model, e.think, cfg.Passes, cfg.ChunkTokens, cfg.NumCtx(), elapsed, records)
+	if enc, err := benchmark.Encode(run); err != nil {
+		fmt.Fprintf(os.Stderr, "note: could not encode %s: %v\n", benchmarkFile, err)
+	} else {
+		dest := cfg.Resolve(benchmarkFile)
+		if err := os.WriteFile(dest, enc, 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "note: could not write %s: %v\n", dest, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "wrote %s\n", dest)
+		}
+	}
+
 	if failed > 0 {
 		return fmt.Errorf("%d benchmark case(s) failed", failed)
 	}
@@ -489,6 +643,11 @@ func report(r benchmark.Result, st stats, goldN int) {
 	if st.thinkChars > 0 {
 		fmt.Fprintf(os.Stderr, "    %d character(s) of reasoning trace (shares the output budget with the facts above)\n",
 			st.thinkChars)
+	}
+	if st.extraRequests > 0 {
+		fmt.Fprintf(os.Stderr,
+			"    glean pass(es): %d extra request(s), %d prompt + %d generated tokens\n",
+			st.extraRequests, st.extraPromptN, st.extraPredictN)
 	}
 }
 
@@ -592,13 +751,13 @@ Usage: fact-extractor [--benchmark] [--model <name>] [--no-think]
   --model <name>  use this Ollama model instead of the one in settings.json
                   (build.ps1 creates "fact-extractor-gemma4" alongside the default,
                   if the Gemma 4 GGUF is present)
-  --no-think      disable thinking for a reasoning model; thinking is on by
-                  default (a reasoning model's own template already defaults
-                  to it) and this flag has no effect on a model with no
-                  thinking mode - checked via Ollama's reported capabilities,
-                  since Ollama rejects the think field outright for a model
-                  that does not support it. The trace is reported (character
-                  count) but not written to the output.
+  --no-think      disable thinking for a reasoning model; otherwise
+                  settings.json's ollama.think (a bool or an effort level
+                  string) is sent, and this flag has no effect on a model with
+                  no thinking mode - checked via Ollama's reported
+                  capabilities, since Ollama rejects the think field outright
+                  for a model that does not support it. The trace is reported
+                  (character count) but not written to the output.
 
 Context and sampling come from settings.json, which is produced by the build.
 The Ollama service is started if none is running (see settings.json), and
