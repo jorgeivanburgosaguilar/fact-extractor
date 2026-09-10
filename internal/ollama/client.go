@@ -83,13 +83,17 @@ func (r Result) Truncated() bool { return r.DoneReason == "length" }
 // to llama.cpp as json_schema, so the reply is grammar-constrained rather than
 // merely requested politely.
 //
-// think is sent explicitly, never left to omitempty by accident, for the same
-// reason num_ctx is always explicit: a default this call did not pin can change
-// under it. For a reasoning model this matters more than most settings, because
-// thinking and content tokens draw from the same output budget (no separate
-// accounting) — a silent default can silently change what that budget is spent
-// on. nil means "let the model/template default decide," used only by Warmup
-// and Unload, which do not care what they get back.
+// think is sent explicitly whenever the model supports it, never left to
+// omitempty by accident, for the same reason num_ctx is always explicit: a
+// default this call did not pin can change under it. For a reasoning model
+// this matters more than most settings, because thinking and content tokens
+// draw from the same output budget (no separate accounting) — a silent
+// default can silently change what that budget is spent on. main.go pins this
+// true unless --no-think says otherwise, but only after SupportsThinking
+// confirms the model has a thinking mode: Ollama returns 400 Bad Request for
+// think on a model that does not, rather than ignoring it. Callers pass nil
+// either because the model cannot think or to mean "let the model/template
+// default decide," which is all Warmup and Unload want.
 func (c *Client) Chat(msgs []Message, opts map[string]any, format json.RawMessage, keepAlive int, think *bool) (*Result, error) {
 	body, err := json.Marshal(chatRequest{
 		Model:     c.model,
@@ -143,6 +147,47 @@ func (c *Client) Chat(msgs []Message, opts map[string]any, format json.RawMessag
 // Model describes one model the service holds.
 type Model struct {
 	Name string `json:"name"`
+}
+
+// SupportsThinking reports whether the configured model has a thinking mode.
+//
+// Ollama rejects an explicit think field outright (400 Bad Request) for a
+// model that was never quantized/templated for it - it does not silently
+// ignore the field the way an unrecognized option elsewhere in the request
+// might. So the caller must ask first, via the same capabilities list
+// /api/show reports, rather than assume every model tolerates think being set.
+func (c *Client) SupportsThinking() (bool, error) {
+	body, err := json.Marshal(map[string]string{"model": c.model})
+	if err != nil {
+		return false, fmt.Errorf("encoding show request: %w", err)
+	}
+	resp, err := c.http.Post(c.host+"/api/show", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return false, fmt.Errorf("calling %s/api/show: %w\n%s", c.host, err, hint(c.host))
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false, fmt.Errorf("reading %s/api/show reply: %w", c.host, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("%s/api/show returned %s: %s",
+			c.host, resp.Status, strings.TrimSpace(string(raw)))
+	}
+
+	var out struct {
+		Capabilities []string `json:"capabilities"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return false, fmt.Errorf("parsing %s/api/show reply: %w", c.host, err)
+	}
+	for _, capability := range out.Capabilities {
+		if capability == "thinking" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // Placement reports how a loaded model is split between GPU and CPU. This is

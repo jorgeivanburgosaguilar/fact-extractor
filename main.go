@@ -3,8 +3,11 @@
 //
 // It does one job. Context and sampling come from settings.json; the input and
 // output filenames are fixed. The flags are --benchmark, --model (override
-// which Ollama model is used for this run) and --think (ask a reasoning model
-// to think before answering).
+// which Ollama model is used for this run) and --no-think (disable thinking
+// for a reasoning model; thinking is on by default for one, and the flag has
+// no effect on a model with no thinking mode - checked against Ollama's
+// reported capabilities before think is ever sent, since Ollama rejects that
+// field outright for a model that does not support it).
 //
 // The Ollama service is managed for the one-shot flow: a service already
 // running is adopted and left alone; otherwise one is started with the tuning
@@ -63,25 +66,13 @@ func main() {
 func run() error {
 	bench := flag.Bool("benchmark", false, "score the gold corpus instead of processing prompt.md")
 	model := flag.String("model", "", "Ollama model to use instead of the one in settings.json")
-	think := flag.Bool("think", false, "ask a reasoning model to think before answering")
+	noThink := flag.Bool("no-think", false, "disable thinking for a reasoning model (thinking is on by default)")
 	flag.Usage = usage
 	flag.Parse()
 	if flag.NArg() > 0 {
 		usage()
 		return fmt.Errorf("unexpected argument %q", flag.Arg(0))
 	}
-
-	// think is sent to Ollama only when --think was actually passed on the
-	// command line. Unset (nil) leaves the model/template default alone;
-	// --think or --think=true pins it on; --think=false pins it off. This is
-	// the pointer, not the bool, that reaches ollama.Client.Chat.
-	var thinkPtr *bool
-	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "think" {
-			v := *think
-			thinkPtr = &v
-		}
-	})
 
 	baseDir, err := resolveBaseDir()
 	if err != nil {
@@ -123,6 +114,23 @@ func run() error {
 	client := ollama.New(cfg.Ollama.Host, cfg.Ollama.Model)
 	if err := client.Preflight(); err != nil {
 		return err
+	}
+
+	// think is sent explicitly, pinned on unless --no-think says otherwise,
+	// but only for a model that actually has a thinking mode: Ollama returns
+	// 400 Bad Request for think on a model that does not, rather than
+	// ignoring it, so this checks first instead of assuming. A reasoning
+	// model's own template already defaults to thinking-on
+	// (hardware-finetune.md §1.8 measured this for Gemma 4: omitting think
+	// behaves identically to true), so leaving it unset never actually turned
+	// thinking off - only --no-think does that, by pinning the request's
+	// think field to false.
+	var thinkPtr *bool
+	if canThink, err := client.SupportsThinking(); err != nil {
+		return fmt.Errorf("checking whether %s supports thinking: %w", cfg.Ollama.Model, err)
+	} else if canThink {
+		think := !*noThink
+		thinkPtr = &think
 	}
 
 	ex := &extractor{cfg: cfg, client: client, system: system, schema: schema, think: thinkPtr}
@@ -190,7 +198,7 @@ type extractor struct {
 	client *ollama.Client
 	system string
 	schema json.RawMessage
-	think  *bool // nil = model/template default; see the --think flag in run()
+	think  *bool // nil if the model has no thinking mode; else pinned true unless --no-think, see run()
 }
 
 // stats is what a run reports about itself.
@@ -357,7 +365,9 @@ func runBenchmark(e *extractor, cfg *settings.Settings) error {
 	fmt.Fprintf(os.Stderr, "benchmarking %s against %d corpus case(s)\n",
 		cfg.Ollama.Model, len(cases))
 	if e.think != nil {
-		fmt.Fprintf(os.Stderr, "thinking: %v (--think)\n", *e.think)
+		fmt.Fprintf(os.Stderr, "thinking: %v\n", *e.think)
+	} else {
+		fmt.Fprintln(os.Stderr, "thinking: not applicable (this model has no thinking mode)")
 	}
 	fmt.Fprintf(os.Stderr, "a case passes with at most %d gold facts unmatched\n",
 		benchmark.Threshold)
@@ -575,15 +585,20 @@ func resolveBaseDir() (string, error) {
 func usage() {
 	fmt.Fprint(os.Stderr, `fact-extractor `+version+` - extract source-traceable facts from a text file
 
-Usage: fact-extractor [--benchmark] [--model <name>] [--think]
+Usage: fact-extractor [--benchmark] [--model <name>] [--no-think]
 
   (no flags)      `+promptFile+` -> `+outputFile+`
   --benchmark     score the gold corpus in `+corpusDir+`/ and exit 0 or 1
   --model <name>  use this Ollama model instead of the one in settings.json
                   (build.ps1 creates "fact-extractor-gemma4" alongside the default,
                   if the Gemma 4 GGUF is present)
-  --think         ask a reasoning model to think before answering; the trace is
-                  reported (character count) but not written to the output
+  --no-think      disable thinking for a reasoning model; thinking is on by
+                  default (a reasoning model's own template already defaults
+                  to it) and this flag has no effect on a model with no
+                  thinking mode - checked via Ollama's reported capabilities,
+                  since Ollama rejects the think field outright for a model
+                  that does not support it. The trace is reported (character
+                  count) but not written to the output.
 
 Context and sampling come from settings.json, which is produced by the build.
 The Ollama service is started if none is running (see settings.json), and

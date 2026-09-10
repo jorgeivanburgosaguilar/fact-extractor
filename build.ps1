@@ -14,14 +14,27 @@ $dist = Join-Path $root 'dist'
 # The Ollama models this build creates. The first is the default that
 # settings.json names; the rest exist only so --model can score them on the same
 # corpus. Each is optional - a missing .gguf skips that model, not the build.
+#
+# $models[0] is always the current benchmark winner (AGENTS.md SS5/SS6: the model
+# matching more gold facts, in total, across the whole corpus becomes the
+# default). A model that loses that comparison is never deleted - it drops to a
+# later entry, still built, still reachable with --model, kept specifically so
+# it can be re-scored as a historical baseline after system-instruction.md or
+# the corpus changes. Gemma 4 E2B (non-QAT) beat Gemma 4 E2B QAT 85/97 to 83/97
+# and Qwen2.5-7B-Instruct-1M 85/97 to 74/97 (README.md#the-scoreboard,
+# hardware-finetune.md SS1.9), so it is $models[0] here; QAT and Qwen are
+# historical entries.
 $modelName = 'fact-extractor'
 $models = @(
     @{ name = 'fact-extractor'; modelfile = 'Modelfile'; candidates = @(
-        (Join-Path $root 'models\Qwen2.5-7B-Instruct-1M-Q4_K_M.gguf'),
-        'D:\Modelos\lmstudio-community\Qwen2.5-7B-Instruct-1M-GGUF\Qwen2.5-7B-Instruct-1M-Q4_K_M.gguf') }
-    @{ name = 'fact-extractor-gemma4'; modelfile = 'Modelfile.gemma4'; candidates = @(
+        (Join-Path $root 'models\gemma-4-E2B-it-Q4_K_M.gguf'),
+        'D:\Modelos\lmstudio-community\gemma-4-E2B-it-GGUF\gemma-4-E2B-it-Q4_K_M.gguf') }
+    @{ name = 'fact-extractor-gemma4-qat'; modelfile = 'Modelfile.gemma4-qat'; candidates = @(
         (Join-Path $root 'models\gemma-4-E2B-it-QAT-Q4_0.gguf'),
         'D:\Modelos\lmstudio-community\gemma-4-E2B-it-QAT-GGUF\gemma-4-E2B-it-QAT-Q4_0.gguf') }
+    @{ name = 'fact-extractor-qwen'; modelfile = 'Modelfile.qwen'; candidates = @(
+        (Join-Path $root 'models\Qwen2.5-7B-Instruct-1M-Q4_K_M.gguf'),
+        'D:\Modelos\lmstudio-community\Qwen2.5-7B-Instruct-1M-GGUF\Qwen2.5-7B-Instruct-1M-Q4_K_M.gguf') }
 )
 
 New-Item -ItemType Directory -Force -Path $dist, "$dist\corpus", "$dist\schemas" | Out-Null

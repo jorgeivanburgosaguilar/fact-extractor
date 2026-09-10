@@ -191,10 +191,12 @@ environment is unknown, and the CLI can only warn.
 
 ### 1.8 Gemma 4 E2B QAT — the reasoning-model comparison
 
-Reachable with `--model fact-extractor-gemma4 --think` (`README.md` has the resulting
-scoreboard). Measured **2026-09-09**, same machine as §1.1, **Ollama 0.33.3** rather than
-the 0.32.15 this file was otherwise validated against (§4) — noted because item 7 of §3
-predicted this experiment before it was run; these are the numbers that landed.
+Reachable with `--model fact-extractor-gemma4-qat`, thinking on by default (`README.md` has
+the resulting scoreboard) — the historical entry now; §1.9 measures the non-QAT release that
+overtook it and backs the default `fact-extractor` name today. Measured **2026-09-09**, same
+machine as §1.1, **Ollama 0.33.3** rather than the 0.32.15 this file was otherwise validated
+against (§4) — noted because item 7 of §3 predicted this experiment before it was run; these
+are the numbers that landed.
 
 ```
 $ nvidia-smi --query-gpu=memory.used,memory.total --format=csv
@@ -226,8 +228,9 @@ and `message.content` back separately on each:
 
 Three things this settles: **the model's own default is thinking-on** — omitting `think`
 behaves identically to `true`, because decoding is greedy with a fixed seed (§2.4) — so
-`--think` exists to make that pinned and explicit rather than to change the default, the
-same reasoning §2.2 gives for always sending `num_ctx`. **Ollama's `gemma4` builtin parser
+`main.go` pins `think: true` explicitly by default (only `--no-think` turns it off) rather
+than leaving it to that default, the same reasoning §2.2 gives for always sending `num_ctx`.
+**Ollama's `gemma4` builtin parser
 splits the reasoning channel cleanly**: `message.content` was valid, schema-conforming JSON
 in all three variants, never once carrying the `<|think|>` / `<|channel>` markers the raw
 chat template (embedded in the GGUF) uses to delimit thinking — confirmed again, per-chunk,
@@ -245,6 +248,72 @@ most, 20556, consistent with it being the longest document). Generation throughp
 per-token rate, as expected for a much smaller model, but the token *volume* thinking adds
 works against that rate: the five-case benchmark with thinking on took 581.3 s wall time,
 against a comparable Qwen benchmark run typically finishing in well under half that.
+
+### 1.9 Gemma 4 E2B (non-QAT) — the version that overtook it
+
+Reachable with `--model fact-extractor-gemma4-qat` for the QAT sibling from here on; this
+build backs the default `fact-extractor` name. Measured **2026-09-09**, same machine and
+Ollama version as §1.8. `.gguf`: `gemma-4-E2B-it-Q4_K_M.gguf`, 3.43 GB on disk (3,427,880,384
+bytes) — QAT (quantization-*aware training*, a checkpoint fine-tuned to be robust under
+quantization) and this post-training Q4_K_M quantization of the base release are genuinely
+different weight sets, not two quant schemes of the same checkpoint, so this section repeats
+§1.8's measurements rather than assuming they carry over.
+
+```
+$ nvidia-smi --query-gpu=memory.used,memory.total --format=csv
+2536 MiB, 6144 MiB
+```
+Same methodology as §1.5/§1.8: model warm (`keep_alive: 30`), `num_ctx 16384`, desktop
+included, card otherwise idle, measured under the tuned service environment (§2.3) rather
+than an ad-hoc `ollama serve`. Against QAT's 2161 MiB, this build costs **~375 MiB more** —
+in the direction its 80 MB-larger file predicts. `ollama ps` / `/api/ps` report the whole
+loaded model at 1,630,210,619 bytes resident on GPU (`size == size_vram`, 100% GPU, confirmed
+by `--benchmark`'s `checkPlacement` preflight on every run in the scoreboard) — against QAT's
+1,551,850,535, a ~78 MB gap that tracks the file-size difference almost exactly.
+
+**The GGUF itself, and thinking, carry over unchanged from §1.8:** `general.architecture =
+gemma4`, `general.size_label = 4.6B`, `gemma4.context_length = 131072`. `/api/show` reports
+the same three capabilities as QAT — `completion`, `tools`, `thinking` — so
+`ollama.Client.SupportsThinking` (AGENTS.md §2) turns thinking on by default here with no
+special-casing; nothing in `main.go` or `internal/ollama` distinguishes this model from its
+QAT sibling. The sibling `mmproj-gemma-4-E2B-it-BF16.gguf` is the vision projector and is,
+as with QAT, not referenced by the Modelfile.
+
+**llmfit, checked before building anything.** Its database has no entry for the QAT release
+— only community re-quants of it turn up — but does carry the canonical non-QAT release:
+
+```
+$ llmfit info "google/gemma-4-E2B-it"
+Overall Score: 86.1/100   Quality 76  Speed 100  Fit 85  Context 100
+Fit Analysis: Good, Memory Utilization 81.2% (4.9/6.0 GB)
+
+$ llmfit plan "google/gemma-4-E2B-it" --context 16384 --kv-quant q8_0
+Minimum Hardware: VRAM 3.7 GB, RAM 8.0 GB, cores 4
+Feasible Run Paths: GPU: yes, est. speed 49.4 tok/s
+```
+
+The same pattern §1.3 found for Qwen on this GPU repeats here: llmfit's estimate (3.7–4.9 GB)
+sits well above the measured 2536 MiB — this GPU is absent from its bandwidth table, and the
+"Good" / "81.2%" verdict is computed from that inflated figure. Measured wins over the
+heuristic, same as everywhere else in this file (§1.3); llmfit's job here was ranking-level
+reassurance that the model fits *at all* before spending the time to `ollama create` and
+benchmark it, not the authoritative VRAM number.
+
+**The benchmark win, not just a tie.** 85/97 (88%) against QAT's 83/97 (86%) — a clean win on
+`05-survey` (18/23 against QAT's 16/23) and an exact tie on the other four documents. Per
+AGENTS.md §2's rule (the current benchmark winner backs the default name), this model now
+does; QAT moved to `fact-extractor-gemma4-qat`, a historical entry kept for re-scoring after
+`system-instruction.md` or the corpus changes. Full per-document numbers are in
+[`README.md`](README.md#the-scoreboard).
+
+**Faster, too — not a speed-for-accuracy trade.** Generation measured **~69 tok/s** (2986
+tokens at 68.8 tok/s, then 210 at 69.1 tok/s, single-document run, tuned service environment)
+against QAT's ~58 tok/s, both fully GPU-resident on the same corpus document and options. The
+five-case benchmark finished in 391.8 s wall time, against 470.5 s for QAT in the same
+session (§1.8's own 581.3 s figure was measured on an earlier Ollama version, so the 470.5 s
+comparison here is the fairer one). Thinking-trace length per case (3151–15921 characters)
+also ran shorter than QAT's 4502–20556 on the same corpus — this build reaches its answers
+with less reasoning spent, not just faster tokens.
 
 ---
 
@@ -555,14 +624,17 @@ possible now. Read against the parameter it counters in §2.
    exposes tokenization only on the llama-server subprocess it manages internally, not
    through its own API.
 7. **No reasoning budget** (§2.8) → a model that can think before answering → **tried, not
-   just predicted — §1.8 has the measurement.** Gemma 4 E2B with `--think` closes
+   just predicted — §1.8 has the measurement.** Gemma 4 E2B, thinking on by default, closes
    `02-research` (14/18 → 18/18) and narrows both remaining capability probes without
    closing them; the mechanism looks like the coverage sweep this row predicted, most
    visible on `02-research`'s qualifiers and appositives coming out as separate facts →
    the predicted cost landed too: thinking tokens compete for the same output headroom §2.2
    fights for (confirmed — no separate accounting, ~2.4× the generation tokens for one
    chunk), though on a smaller, faster model (~58 tok/s vs. 25–32) the wall-clock cost is
-   less severe than this row originally worried, even after that overhead.
+   less severe than this row originally worried, even after that overhead. §1.9 pushes this
+   further on the same architecture, no extra tuning: the non-QAT release of the same model
+   closes `05-survey` further still (13/23 → 16/23 → 18/23) while running faster, not slower
+   (~69 tok/s), than the QAT build this row measured.
 8. **Greedy decoding is the only stability mechanism available** (§2.4) → with headroom to
    spare, self-consistency — sample several times, keep the facts that appear in a
    majority — would convert the 17-vs-18 variance in §2.4 from noise into an actual
